@@ -8,7 +8,10 @@
 
 198 protocols with no token, priced by **one fitted size curve** learned from
 92 launched peers — and published with its own measured error: median blind
-miss ×3.82, ranking validated at Spearman IC 0.32. Entry for the make.fun
+miss ×3.82, ranking validated at Spearman IC 0.32. The curve itself is the
+survivor of a pre-registered two-origin hindcast gate: six challengers were
+fitted against it this round and none cleared the bar (the gate, below).
+Entry for the make.fun
 bounty ["Build the best token launch radar"](https://make.fun/bounty/token-radar-01) (token-radar-01).
 
 ## The model (radar-5)
@@ -20,8 +23,8 @@ implied = round( 10 ^ (4.5869 + 0.3135 x log10(TVL)) )
 One **median (least-absolute-deviations) fit** on the snapshot's clean traded
 comps (tokenized protocols that pass the board's own hygiene) — the typical
 launch, not the average one, so a handful of extreme multiples cannot drag
-the curve. Nothing else moves a price — and that is a measured result, not
-a preference:
+the curve. Nothing else moves a row's ranked value — and that is a measured
+result, not a preference:
 
 - Fourteen candidate pricers were graded **leave-one-out** over the 92 comps
   (price each as if pre-token, from the other 91). radar-2's category
@@ -45,15 +48,17 @@ a preference:
   mean is ×2.16.
 - The audit page also grades every candidate's whole held-out distribution
   by a **proper log score** — a rule that cannot be gamed by widening a
-  band. The hybrid takes it by 0.002 over the shipped model (−1.249
-  against −1.251); the shipped model is second of fourteen.
+  band. The hybrid scores −1.2494; the shipped model scores −1.2510 —
+  second of fourteen.
 - Every row carries a **split-conformal band** (central 50%) built from the
   shipped model's held-out residuals, conditioned on TVL tercile. Achieved
   coverage: 51.1% at 50% nominal (47 of 92 launched peers inside), 81.5% at
   80%, 92.4% at 90%.
 - The board ranks **all 198** strictly pre-token protocols that pass the
   hygiene; the 144 it turns away are published in an exclusion audit with
-  reasons (the largest is an exchange's own product line at $13.8B TVL).
+  reasons — 42 CEX products, 38 liquid-staking, 43 bridge variants, 16
+  versioned or wrapped variants, 5 restaking (the largest is an exchange's
+  own product line at $13.8B TVL).
 - Each farm plan is graded, in this board's own words — **PAYS** (nets
   positive at the band's bear end), **CLOSE** (only at base), **SHORT** (at
   neither) — for a $1,000 reference position under a labelled 10%
