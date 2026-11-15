@@ -1,7 +1,8 @@
 // Token Launch Radar — the dashboard. Static, no network: everything renders from window.RADAR
-// (data.js, written by main.ts from the same model that writes board.json). The model is radar-4:
+// (data.js, written by main.ts from the same model that writes board.json). The model is radar-5:
 // one fitted size curve from the snapshot's clean traded comps — the median (LAD) fit, chosen
-// over the least-squares fit by an out-of-time hindcast — with split-conformal bands. The page
+// over the least-squares fit by an out-of-time hindcast in radar-4 and re-confirmed this round
+// under a two-origin hindcast gate against six challengers — with split-conformal bands. The page
 // recomputes every row's implied value from the published fit and says whether it agrees.
 'use strict';
 
@@ -93,7 +94,7 @@ function masthead(active, compact) {
   ${BT.comps} launched peers — and published with its own measured error: median blind miss
   <span class="amber">×${BT.candidates.find((c) => c.winner).median_error_factor}</span>, ranking validated at
   Spearman IC <em>${BT.rank_ic}</em>. No category multiples, no momentum term: the hindcast removed them.</p>
-  <div class="unknowns">KNOWN UNKNOWNS — out-of-time error <b>×${BT.hindcast.test_median_error_factor}</b> (hindcast, newest third) ·
+  <div class="unknowns">KNOWN UNKNOWNS — out-of-time error <b>×${BT.hindcast.mean_median_error_factor}</b> (two-origin hindcast mean) ·
   median bias <b>×${bias}</b> · thin category evidence on <b>${BT.thin_evidence_pct}%</b> of rows ·
   conformal band coverage <b>${BT.calibration[0].achieved_pct}%</b> at ${BT.calibration[0].nominal_pct}% nominal</div>
   <p class="funnel">FUNNEL — <b>${R.headline.protocol_total} protocols</b> in the snapshot →
@@ -155,12 +156,15 @@ function frontPage() {
   <div class="rail">
     <section class="panel"><h2>Calibration — priced blind, graded honestly</h2>${scatterSVG()}
     <table class="mini-table"><tbody>${calib}</tbody></table>
-    <p class="sub">Split-conformal bands from leave-one-out residuals: coverage is a construction property, and the achieved column is the receipt.</p></section>
+    <p class="sub">Split-conformal bands from leave-one-out residuals: coverage is a construction property, and the achieved column is the receipt.</p>
+    <p class="sub">Proper log score of the held-out predictive distributions (higher is better): ${[...BT.log_scores].sort((a, b) => b.mean_log_score - a.mean_log_score).slice(0, 3).map((s) => `<b class="num" style="color:var(--ink)">${s.id} ${s.mean_log_score}</b>`).join(' · ')} —
+    the whole distribution graded, centre and spread together, by a rule that cannot be gamed by widening a band. The shipped model is second of ${BT.log_scores.length} by it, a hair behind the hybrid.</p></section>
     <section class="panel"><h2>The backtest that chose this model</h2>
     <table class="mini-table"><thead><tr><th>Cand.</th><th class="r">Med miss</th><th class="r">≤2×</th><th class="r">≤3×</th></tr></thead><tbody>${cand}</tbody></table>
-    <p class="sub">◆ ships. Leave-one-out graded all ${BT.candidates.length}; the <b>hindcast</b> (fit oldest ${BT.hindcast.train_n}, grade newest ${BT.hindcast.test_n})
-    struck the growth and maturity terms, then chose the median fit over the least-squares fit — out-of-time ×${BT.hindcast.test_median_error_factor}
-    against ×${BT.hindcast_grades.find((g) => g.id === 'B').median_error_factor}, drift ×${BT.hindcast.drift} against the in-window grade.</p></section>
+    <p class="sub">◆ ships. Leave-one-out graded all ${BT.candidates.length}; the <b>two-origin hindcast</b> (fit oldest half, grade the next sixth;
+    fit oldest two-thirds, grade the newest third) then re-confirmed the median fit against six challengers — a Huber fit, an ensemble,
+    fitted growth/maturity/breadth terms and the category factor at two shrinkages. None cleared the gate: the median curve's two-origin
+    mean is ×${BT.hindcast.mean_median_error_factor}, and the nearest challenger finished inside the 5% tie margin. The full gate table is on the audit page.</p></section>
     <section class="panel"><h2>Rank validation</h2>
     <p class="sub" style="margin-top:0">The product is a ranking, so the ranking is what we validate: Spearman IC
     <b class="num" style="color:var(--ink)">${BT.rank_ic}</b> between held-out predicted and actual ranks of the ${BT.comps} comps.
@@ -282,8 +286,9 @@ function detailPage(r) {
     ${bandBar(r)}<div class="band-num">bear ${money(r.implied_low_usd)} (×${f.lo}) · base ${money(r.implied_value_usd)} · bull ${money(r.implied_high_usd)} (×${f.hi}) — split-conformal, TVL-tercile band.
     In the backtest, ${inBand} of ${BT.comps} launched peers landed inside their central band — a band this wide is a coin the model has already flipped ${BT.comps} times.</div>
     </div>
-    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00. No judgement terms ship: the hindcast struck
-    radar-2's growth/maturity multipliers (×0.42–×1.60 combined), then chose this median fit over least squares. 100% of this price is
+    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00. No judgement terms ship: two hindcast generations struck
+    radar-2's asserted growth/maturity multipliers (×0.42–×1.60 combined), then their fitted one-coefficient successors, a category factor
+    at two shrinkages, a Huber fit, an ensemble and a breadth term. 100% of this price is
     the fitted reference class. Page recompute: ${money(check)} — ${agree ? 'agrees with board.json to the dollar' : 'differs from board.json; the board value stands'}.</div>
     </div>
   </section>
@@ -379,9 +384,10 @@ function wallPage() {
 /* ---------- audit & model card ---------- */
 function auditPage() {
   const hind = new Map(BT.hindcast_grades.map((g) => [g.id, g]));
+  const lsMap = new Map(BT.log_scores.map((s) => [s.id, s.mean_log_score]));
   const cand = BT.candidates.map((c) => { const h = hind.get(c.id); return `<tr${c.winner ? ' style="color:var(--signal)"' : ''}><td>${c.id} — ${esc(c.label)}${c.winner ? ' ◆ ships' : ''}</td>
     <td class="r num">×${c.median_error_factor}</td><td class="r num">${c.within_2x_pct}%</td><td class="r num">${c.within_3x_pct}%</td>
-    <td class="r num">${h ? '×' + h.median_error_factor : '—'}</td><td class="r num">${h ? h.within_2x_pct + '%' : '—'}</td></tr>`; }).join('');
+    <td class="r num">${h ? '×' + h.origin1_median_error_factor : '—'}</td><td class="r num">${h ? '×' + h.median_error_factor : '—'}</td><td class="r num">${h ? '×' + h.mean_median_error_factor : '—'}</td><td class="r num">${lsMap.has(c.id) ? lsMap.get(c.id) : '—'}</td></tr>`; }).join('');
   const reasons = {};
   for (const e of R.audit.excluded) reasons[e.reason] = (reasons[e.reason] || 0) + 1;
   const reasonRows = Object.entries(reasons).sort((a, b) => b[1] - a[1])
@@ -403,15 +409,17 @@ function auditPage() {
     pre-token markets historically overprice launches (pre-market marks have run ≈2.4× launch FDV in known cases); the ranking's IC is ${BT.rank_ic}, a weak-to-moderate signal, and decile realized multiples are noisy — read the band, not the point.</dd>
   </dl></section>
   <section class="panel"><h2>Full backtest — every candidate, both splits</h2>
-  <div class="table-wrap"><table><thead><tr><th>Candidate</th><th class="r">LOO med miss</th><th class="r">≤2×</th><th class="r">≤3×</th><th class="r">Hindcast miss</th><th class="r">Hindcast ≤2×</th></tr></thead><tbody>${cand}</tbody></table></div>
-  <p class="sub">Selection discipline: leave-one-out graded the field; every keep-or-drop was decided on the out-of-time hindcast
-  (fit oldest ${BT.hindcast.train_n} dated comps, grade newest ${BT.hindcast.test_n}) — never on the split that calibrates the bands.
-  The growth/maturity terms (E) won leave-one-out and lost out-of-time, so they do not ship. The median fit (G) lost leave-one-out
-  (×${BT.candidates.find((c) => c.id === 'G').median_error_factor} against the least-squares ×${BT.candidates.find((c) => c.id === 'B').median_error_factor})
-  and won the hindcast (×${BT.hindcast.test_median_error_factor} against ×${BT.hindcast_grades.find((g) => g.id === 'B').median_error_factor}), so it ships:
-  the same rule, applied the same way, both rounds. The hybrid (H) never stood apart out-of-time — its train era holds no category
-  with 12+ comps, so there it is the global curve itself, and in-window it graded worse. Category factors (C, D) lost in every form:
-  shrunk toward 1 with k = 4 and damped at γ = 0.5, they still cost more out-of-sample than they pay.</p></section>
+  <div class="table-wrap"><table><thead><tr><th>Candidate</th><th class="r">LOO med miss</th><th class="r">≤2×</th><th class="r">≤3×</th><th class="r">Origin 1</th><th class="r">Origin 2</th><th class="r">Mean</th><th class="r">Log score</th></tr></thead><tbody>${cand}</tbody></table></div>
+  <p class="sub">Selection discipline: leave-one-out graded the field; every keep-or-drop was decided on the <b>two-origin hindcast</b>
+  (origin 1: fit oldest ${BT.hindcast_origins[0].train_n} dated comps, grade the next ${BT.hindcast_origins[0].test_n}; origin 2: fit oldest ${BT.hindcast_origins[1].train_n},
+  grade the newest ${BT.hindcast_origins[1].test_n}) — never on the split that calibrates the bands. A challenger ships only on a strict
+  two-origin mean win of 5% or more (10% for the ensemble), losing neither origin by over 10%, with a stable coefficient sign where it
+  fits one. Round 5 ran six: the Huber fit (I) and the ensemble (J) each lost origin 2 by more than 10%; the fitted growth term (M) beat
+  the incumbent at both origins by under 1.2% — inside the margin, recorded as a tie, and its full-pool coefficient flips sign against both
+  era fits, so the growth question is closed; the fitted maturity (N) and breadth (O) coefficients flip sign between eras outright.
+  Category factors lost at both shrinkages (C, C2). The median fit ships again — the same rule, applied the same way, every round.
+  The log-score column grades each candidate's whole held-out distribution under a proper scoring rule; the hybrid (H) edges it there
+  by 0.002, inside any reasonable noise, and the shipped model is second of ${BT.log_scores.length}.</p></section>
   <section class="panel"><h2>Exclusion audit — all ${R.audit.excluded.length} turned away, with reasons</h2>
   <table class="mini-table"><tbody>${reasonRows}</tbody></table>
   <p class="sub">Counterfactual, stated plainly: the largest exclusion is ${esc(largest.name)} at ${money(largest.tvl_usd)} of TVL.

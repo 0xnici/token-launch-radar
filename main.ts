@@ -7,9 +7,9 @@
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
 // and dashboard/app.js read /output/data.js, which this program writes from the same board. The model
-// is radar-4 (lib/model.ts): every pre-token protocol is priced by one median-fitted size curve
+// is radar-5 (lib/model.ts): every pre-token protocol is priced by one median-fitted size curve
 // learned from the snapshot's clean traded comps, the choice graded by a leave-one-out backtest
-// and an out-of-time hindcast, with split-conformal bands by TVL tercile. The page states that model,
+// and a two-origin out-of-time hindcast gate, with split-conformal bands by TVL tercile. The page states that model,
 // recomputes every row from it, and gives every protocol a farm plan. The gate's shape is unchanged.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:

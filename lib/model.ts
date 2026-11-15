@@ -112,6 +112,12 @@ export interface ModelConstants {
   shrink_k: number;
   /** The damping exponent the backtest applied to the category factor (candidates C and D). */
   category_gamma: number;
+  /** The Huber fit's tuning constant in log10 space: quadratic inside it, linear beyond (candidate I). */
+  huber_delta: number;
+  /** The Huber fit's fixed IRLS iteration count: fixed, so the fit is deterministic (candidate I). */
+  huber_iterations: number;
+  /** The strong shrinkage weight of candidate C2's category factor (the weak form uses shrink_k). */
+  category_shrink_k_strong: number;
   /** The residual quantiles that set each row's band: the winner's leave-one-out P25 and P75. */
   band_quantile_lo: number;
   band_quantile_hi: number;
@@ -136,6 +142,9 @@ export const MODEL: ModelConstants = {
   multiple_cap: 2.5,
   shrink_k: 4,
   category_gamma: 0.5,
+  huber_delta: 0.35,
+  huber_iterations: 100,
+  category_shrink_k_strong: 16,
   band_quantile_lo: 0.25,
   band_quantile_hi: 0.75,
   verdict_reference_capital: 1000,
@@ -144,7 +153,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -332,9 +341,23 @@ export interface Backtest {
   rank_ic: number;
   decile_realized_multiples: number[];
   /** Rolling-origin hindcast: fit on the oldest comps, graded on the newest. */
-  hindcast: { train_n: number; test_n: number; test_median_error_factor: number; drift: number };
-  /** Every hindcast contender's own out-of-time grade, published so the decision split is auditable. */
-  hindcast_grades: { id: string; median_error_factor: number; within_2x_pct: number }[];
+  hindcast: { train_n: number; test_n: number; test_median_error_factor: number; drift: number; mean_median_error_factor: number };
+  /** Every hindcast contender's own out-of-time grade, published so the decision split is auditable.
+   *  median_error_factor is the second origin's (the newest third, radar-4's original split). */
+  hindcast_grades: { id: string; median_error_factor: number; within_2x_pct: number; origin1_median_error_factor: number; mean_median_error_factor: number }[];
+  /** The two-origin gate's raw material: both origins, every candidate graded on each. */
+  hindcast_origins: { label: string; train_n: number; test_n: number; grades: { id: string; median_error_factor: number; within_2x_pct: number }[] }[];
+  /** The fitted-coefficient candidates' coefficients, fitted on each origin's training era alone:
+   *  the sign-stability evidence the gate's kill rule reads. */
+  fitted_coefficients: { beta: [number, number]; gamma: [number, number]; theta: [number, number] };
+  /** The shipped model's adjustment coefficients, fitted on all clean comps (zero when its term is absent). */
+  adjustments: { beta: number; gamma: number; theta: number };
+  /** The gate's verdict on each challenger, in the gate's own words. */
+  gate_verdicts: { id: string; verdict: string }[];
+  /** Proper log scores of the leave-one-out predictive distributions: mean log density of the
+   *  realised caps under a lognormal centred on each candidate's held-out prediction, with that
+   *  candidate's own residual spread. Higher is better; a strictly proper scoring rule. */
+  log_scores: { id: string; mean_log_score: number; sigma: number }[];
   thin_evidence_pct: number;
 }
 
@@ -587,6 +610,142 @@ export function fitCurveLAD(pool: SnapshotProtocol[]): CurveFit {
   return { intercept: round4(best.a), slope: round4(best.b) };
 }
 
+/**
+ * The Huber size curve (candidate I): an M-estimator between least squares and the median fit.
+ * Iteratively reweighted least squares from the OLS start, with the model's tuning constant in
+ * log10 space — residuals inside it count quadratically, beyond it linearly, so a comp's pull on
+ * the line never exceeds the constant's. A fixed iteration count keeps the fit deterministic;
+ * the weights have long settled before it runs out. Rounded to 4 decimals at the source.
+ */
+export function fitCurveHuber(pool: SnapshotProtocol[], model: ModelConstants = MODEL): CurveFit {
+  if (pool.length < 2) return fitCurve(pool);
+  const xs = pool.map((p) => Math.log10(p.tvl_usd));
+  const ys = pool.map((p) => Math.log10(p.mcap_usd!));
+  let { intercept: a, slope: b } = fitCurve(pool);
+  for (let iter = 0; iter < model.huber_iterations; iter++) {
+    const ws = xs.map((x, i) => {
+      const r = Math.abs(ys[i]! - (a + b * x));
+      return r <= model.huber_delta ? 1 : model.huber_delta / r;
+    });
+    let sw = 0;
+    let mx = 0;
+    let my = 0;
+    for (let i = 0; i < xs.length; i++) {
+      sw += ws[i]!;
+      mx += ws[i]! * xs[i]!;
+      my += ws[i]! * ys[i]!;
+    }
+    mx /= sw;
+    my /= sw;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < xs.length; i++) {
+      num += ws[i]! * (xs[i]! - mx) * (ys[i]! - my);
+      den += ws[i]! * (xs[i]! - mx) * (xs[i]! - mx);
+    }
+    b = den > 0 ? num / den : 0;
+    a = my - b * mx;
+  }
+  return { intercept: round4(a), slope: round4(b) };
+}
+
+/**
+ * The two-estimator blend fit (candidate J): the average of the least-squares and median fits.
+ * The geometric mean of two power laws is the power law of their averaged coefficients, so the
+ * blend is itself one curve, with one intercept and one slope, rounded at the source.
+ */
+export function fitBlend(pool: SnapshotProtocol[]): CurveFit {
+  const ols = fitCurve(pool);
+  const lad = fitCurveLAD(pool);
+  return { intercept: round4((ols.intercept + lad.intercept) / 2), slope: round4((ols.slope + lad.slope) / 2) };
+}
+
+/** The growth covariate of the fitted-coefficient candidates: the 7-day change, clamped as radar-2 clamps it, in units of 1. */
+export function growthCovariate(p: SnapshotProtocol, model: ModelConstants): number {
+  const raw = finite(p.change_7d, 0);
+  return Math.min(model.growth_cap, Math.max(model.growth_floor, raw)) / 100;
+}
+
+/** The maturity covariate: the protocol's age as a fraction of the model's maturity horizon. */
+export function ageFraction(p: SnapshotProtocol, asOf: string, model: ModelConstants): number {
+  const a = ageDays(asOf, p.listed_at) ?? model.unknown_age_days;
+  return Math.min(Math.max(a, 0), model.maturity_days) / model.maturity_days;
+}
+
+/** The breadth covariate: log10 of one plus the chain count. */
+export function breadthCovariate(p: SnapshotProtocol): number {
+  return Math.log10(1 + p.chains.length);
+}
+
+/** A positive floor under every fitted adjustment multiplier: a guard, not a parameter — no fitted term may price a row at zero. */
+const ADJ_FLOOR = 0.05;
+
+/**
+ * The least-squares fit of one linear adjustment term, (1 + coefficient x covariate), against
+ * a pool's log residuals: the coefficient minimising the sum of squared
+ * (residual − log10(1 + coefficient x covariate)). One parameter, fitted in-window, never
+ * hand-set; found by golden-section search on a fixed bracket at a fixed iteration count, so
+ * the fit is deterministic.
+ */
+function fitLinearTerm(residuals: number[], covariates: number[]): number {
+  const sse = (b: number): number =>
+    residuals.reduce((s, r, i) => {
+      const d = r - Math.log10(Math.max(ADJ_FLOOR, 1 + b * covariates[i]!));
+      return s + d * d;
+    }, 0);
+  let lo = -5;
+  let hi = 5;
+  const gr = (Math.sqrt(5) - 1) / 2;
+  let c = hi - gr * (hi - lo);
+  let d = lo + gr * (hi - lo);
+  let fc = sse(c);
+  let fd = sse(d);
+  for (let iter = 0; iter < 200; iter++) {
+    if (fc < fd) {
+      hi = d;
+      d = c;
+      fd = fc;
+      c = hi - gr * (hi - lo);
+      fc = sse(c);
+    } else {
+      lo = c;
+      c = d;
+      fc = fd;
+      d = lo + gr * (hi - lo);
+      fd = sse(d);
+    }
+  }
+  return (lo + hi) / 2;
+}
+
+/** Candidate M's growth coefficient: the least-squares fit of the (1 + beta x change) term on the curve's residuals over the pool. */
+export function fitGrowthBeta(pool: SnapshotProtocol[], fit: CurveFit, model: ModelConstants): number {
+  return fitLinearTerm(
+    pool.map((p) => Math.log10(p.mcap_usd! / curveValue(fit, p.tvl_usd))),
+    pool.map((p) => growthCovariate(p, model)),
+  );
+}
+
+/** Candidate N's maturity coefficient: the same fit, on the residuals candidate M leaves behind. */
+export function fitMaturityGamma(pool: SnapshotProtocol[], fit: CurveFit, beta: number, asOf: string, model: ModelConstants): number {
+  return fitLinearTerm(
+    pool.map((p) => Math.log10(p.mcap_usd! / (curveValue(fit, p.tvl_usd) * Math.max(ADJ_FLOOR, 1 + beta * growthCovariate(p, model))))),
+    pool.map((p) => ageFraction(p, asOf, model)),
+  );
+}
+
+/** Candidate O's breadth coefficient: least squares, through the origin, of the curve's log residuals on the breadth covariate. */
+export function fitBreadthTheta(pool: SnapshotProtocol[], fit: CurveFit): number {
+  let num = 0;
+  let den = 0;
+  for (const p of pool) {
+    const c = breadthCovariate(p);
+    num += c * Math.log10(p.mcap_usd! / curveValue(fit, p.tvl_usd));
+    den += c * c;
+  }
+  return den > 0 ? num / den : 0;
+}
+
 /** How many comps a category needs before the hybrid gives it a curve of its own. */
 export const HYBRID_MIN_COMPS = 12;
 
@@ -699,6 +858,41 @@ const priceH: Pricer = (target, pool, _asOf, model) => {
   return curveValue(curves.get(target.category ?? '') ?? global, target.tvl_usd);
 };
 
+/** Candidate I: the Huber size curve — between least squares and the median fit. */
+const priceI: Pricer = (target, pool, _asOf, model) => curveValue(fitCurveHuber(pool, model), target.tvl_usd);
+
+/** Candidate J: the two-estimator ensemble — the geometric mean of the least-squares and median curves. */
+const priceJ: Pricer = (target, pool) => curveValue(fitBlend(pool), target.tvl_usd);
+
+/** Candidate C2: candidate C's category factor with the strong shrinkage weight (k = 16, not 4). */
+const priceC2: Pricer = (target, pool, asOf, model) => priceC(target, pool, asOf, { ...model, shrink_k: model.category_shrink_k_strong });
+
+/** Candidate M: the median curve times a fitted growth term, (1 + beta x clamped 7-day change). */
+const priceM: Pricer = (target, pool, _asOf, model) => {
+  const fit = fitCurveLAD(pool);
+  const beta = fitGrowthBeta(pool, fit, model);
+  return curveValue(fit, target.tvl_usd) * Math.max(ADJ_FLOOR, 1 + beta * growthCovariate(target, model));
+};
+
+/** Candidate N: candidate M times a fitted maturity term, (1 + gamma x age fraction). */
+const priceN: Pricer = (target, pool, asOf, model) => {
+  const fit = fitCurveLAD(pool);
+  const beta = fitGrowthBeta(pool, fit, model);
+  const gamma = fitMaturityGamma(pool, fit, beta, asOf, model);
+  return (
+    curveValue(fit, target.tvl_usd) *
+    Math.max(ADJ_FLOOR, 1 + beta * growthCovariate(target, model)) *
+    Math.max(ADJ_FLOOR, 1 + gamma * ageFraction(target, asOf, model))
+  );
+};
+
+/** Candidate O: the median curve with a fitted chain-breadth term added in log space. */
+const priceO: Pricer = (target, pool) => {
+  const fit = fitCurveLAD(pool);
+  const theta = fitBreadthTheta(pool, fit);
+  return curveValue(fit, target.tvl_usd) * Math.pow(10, theta * breadthCovariate(target));
+};
+
 const CANDIDATES: { id: string; label: string; pricer: Pricer }[] = [
   { id: 'A', label: 'radar-2: category median multiple x growth x maturity', pricer: priceA },
   { id: 'B', label: 'fitted size curve alone (least squares)', pricer: priceB },
@@ -708,14 +902,26 @@ const CANDIDATES: { id: string; label: string; pricer: Pricer }[] = [
   { id: 'F', label: 'size curve fitted to adjustment-deflated caps, x growth x maturity', pricer: priceF },
   { id: 'G', label: 'median (LAD) size curve', pricer: priceG },
   { id: 'H', label: 'hybrid: global curve + shrunk category curves (12+ comps)', pricer: priceH },
+  { id: 'I', label: 'Huber size curve (delta 0.35 in log10 space)', pricer: priceI },
+  { id: 'J', label: 'two-estimator ensemble: geometric mean of the OLS and median curves', pricer: priceJ },
+  { id: 'M', label: 'median curve x fitted growth term (one coefficient)', pricer: priceM },
+  { id: 'N', label: 'median curve x fitted growth x fitted maturity (one coefficient each)', pricer: priceN },
+  { id: 'O', label: 'median curve + fitted chain-breadth term (one coefficient)', pricer: priceO },
+  { id: 'C2', label: 'size curve + category factor, strong shrinkage (k = 16)', pricer: priceC2 },
 ];
 
 /** The candidate pricers by id, for every place that must price with the shipped model. */
 const PRICER_BY_ID = new Map(CANDIDATES.map((c) => [c.id, c.pricer]));
 
-/** The shipped model's fit of a comp pool: the LAD fit when the median curve ships, OLS otherwise. */
-export function fitShipped(pool: SnapshotProtocol[], winner: string): CurveFit {
-  return winner === 'G' ? fitCurveLAD(pool) : fitCurve(pool);
+/**
+ * The shipped model's curve fit of a comp pool: each winning estimator's own fit. The adjusted
+ * winners (M, N, O) ride on the median fit; their coefficients live in the backtest's adjustments.
+ */
+export function fitShipped(pool: SnapshotProtocol[], winner: string, model: ModelConstants = MODEL): CurveFit {
+  if (winner === 'I') return fitCurveHuber(pool, model);
+  if (winner === 'J') return fitBlend(pool);
+  if (winner === 'G' || winner === 'M' || winner === 'N' || winner === 'O') return fitCurveLAD(pool);
+  return fitCurve(pool);
 }
 
 /** Leave-one-out residuals of one pricer over the comps: log10(actual / predicted) per comp. */
@@ -774,8 +980,9 @@ function spearman(xs: number[], ys: number[]): number {
 
 /**
  * The backtest that shapes the model. Leave-one-out grades every candidate over the clean
- * comps; a rolling-origin hindcast (fit on the oldest dated comps, grade on the newest) then
- * decides whether radar-2's adjustment terms ship — the split that chooses is never the split
+ * comps and calibrates the shipped model's bands; a two-origin rolling hindcast (fit the
+ * oldest half, grade the next sixth; fit the oldest two-thirds, grade the newest third) then
+ * decides what ships under a pre-registered gate — the split that chooses is never the split
  * that calibrates. The shipped model's own leave-one-out residuals build the conformal bands,
  * global and per TVL tercile, and the rank validation grades the ranking itself.
  */
@@ -802,35 +1009,120 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
   );
   const looWinner = looRanked[0]!;
 
-  // The hindcast: dated comps by listing date, oldest two-thirds fit, newest third graded.
-  // Candidates B (plain curve) and E (adjusted curve) stand for the keep-or-drop decision.
+  // The two-origin hindcast (the round-5 gate): dated comps by listing date. Origin 1 fits the
+  // oldest half and grades the next sixth; origin 2 fits the oldest two-thirds and grades the
+  // newest third — radar-4's original split, kept as the second origin so its grades continue.
+  // Every candidate is graded on both origins; the gate below decides what ships, so a decision
+  // must survive two eras, not one draw. The incumbent is G, the standing median curve.
   const dated = comps.filter((p) => p.listed_at !== null).sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : 1));
-  const cut = Math.ceil((dated.length * 2) / 3);
-  const train = dated.slice(0, cut);
-  const test = dated.slice(cut);
-  const hindcastGrade = (pricer: Pricer): { med: number; within_2x_pct: number } => {
+  const cut1 = Math.ceil(dated.length / 2);
+  const cut2 = Math.ceil((dated.length * 2) / 3);
+  const origins = [
+    { label: 'origin 1: fit oldest 50%, grade the next sixth', train: dated.slice(0, cut1), test: dated.slice(cut1, cut2) },
+    { label: 'origin 2: fit oldest two-thirds, grade the newest third', train: dated.slice(0, cut2), test: dated.slice(cut2) },
+  ];
+  const gradeOn = (pricer: Pricer, train: SnapshotProtocol[], test: SnapshotProtocol[]): { med: number; within_2x_pct: number } => {
     const errs = test.map((t) => Math.abs(Math.log10(t.mcap_usd! / pricer(t, train, snapshot.as_of, model))));
     return {
       med: median(errs),
       within_2x_pct: Math.round((errs.filter((e) => e <= Math.log10(2)).length / errs.length) * 1000) / 10,
     };
   };
-  // The decision split grades the plain curve (B), its adjusted twin (E), the median fit (G)
-  // and the hybrid (H). The plain curve is the incumbent: a challenger ships only on a strict
-  // out-of-time win, and ties stay with the simpler model. (On this snapshot the hybrid's train
-  // era holds no category with 12+ comps, so out-of-time it is the global curve itself.)
-  const hindcastGrades = ['B', 'E', 'G', 'H'].map((id) => {
-    const g = hindcastGrade(PRICER_BY_ID.get(id)!);
-    return { id, median_error_factor: round4(Math.pow(10, g.med)), within_2x_pct: g.within_2x_pct, med: g.med };
+  const originGrades = origins.map((o) => ({
+    ...o,
+    grades: CANDIDATES.map((c) => {
+      const g = gradeOn(c.pricer, o.train, o.test);
+      return { id: c.id, median_error_factor: round4(Math.pow(10, g.med)), within_2x_pct: g.within_2x_pct };
+    }),
+  }));
+  const factorAt = (originIdx: number, id: string): number => originGrades[originIdx]!.grades.find((g) => g.id === id)!.median_error_factor;
+  const meanFactor = (id: string): number => (factorAt(0, id) + factorAt(1, id)) / 2;
+
+  // The fitted coefficients on each origin's training era alone: the sign-stability evidence.
+  const originFits = origins.map((o) => {
+    const lad = fitCurveLAD(o.train);
+    const beta = fitGrowthBeta(o.train, lad, model);
+    return { beta, gamma: fitMaturityGamma(o.train, lad, beta, snapshot.as_of, model), theta: fitBreadthTheta(o.train, lad) };
   });
-  let shippedId = 'B';
-  for (const g of hindcastGrades) {
-    if (g.id !== 'B' && g.med < hindcastGrades.find((h) => h.id === shippedId)!.med) shippedId = g.id;
+  const fullFit = fitCurveLAD(comps);
+  const fullBeta = fitGrowthBeta(comps, fullFit, model);
+  const adjustments = {
+    beta: round4(fullBeta),
+    gamma: round4(fitMaturityGamma(comps, fullFit, fullBeta, snapshot.as_of, model)),
+    theta: round4(fitBreadthTheta(comps, fullFit)),
+  };
+
+  // Category-factor materiality: how many board rows the factor reprices by more than 5%
+  // against the incumbent, priced from the full comp pool.
+  const rankable = snapshot.protocols.filter((p) => isRankable(p));
+  const movedRows = (pricer: Pricer): number =>
+    rankable.filter((p) => Math.abs(pricer(p, comps, snapshot.as_of, model) / priceG(p, comps, snapshot.as_of, model) - 1) > 0.05).length;
+
+  // The gate, pre-registered before it ran: a challenger replaces the incumbent only if its
+  // mean hindcast median error across both origins beats the incumbent's by at least 5%
+  // relative (the ensemble J: 10% — it costs the entry its one-curve story), it loses neither
+  // origin by more than 10% relative, a fitted coefficient keeps its sign at both origins, and
+  // a category factor actually reprices at least 10 board rows by over 5%. Wins inside the
+  // margin are recorded as ties and the incumbent stays.
+  const incumbentMean = meanFactor('G');
+  const verdictById = new Map<string, string>();
+  const passers: { id: string; mean: number }[] = [];
+  for (const id of ['I', 'J', 'M', 'N', 'O', 'C', 'C2']) {
+    const mean = meanFactor(id);
+    const margin = id === 'J' ? 0.1 : 0.05;
+    let verdict: string | null = null;
+    if (id === 'M' || id === 'N' || id === 'O') {
+      const coefs =
+        id === 'M'
+          ? [originFits[0]!.beta, originFits[1]!.beta]
+          : id === 'N'
+            ? [originFits[0]!.gamma, originFits[1]!.gamma]
+            : [originFits[0]!.theta, originFits[1]!.theta];
+      if (coefs[0] === 0 || coefs[1] === 0 || Math.sign(coefs[0]!) !== Math.sign(coefs[1]!))
+        verdict = `rejected: its fitted coefficient flips sign between origins (${round4(coefs[0]!)} at origin 1, ${round4(coefs[1]!)} at origin 2) — era noise, not signal`;
+    }
+    if (verdict === null && (factorAt(0, id) > factorAt(0, 'G') * 1.1 || factorAt(1, id) > factorAt(1, 'G') * 1.1))
+      verdict = 'rejected: it loses one origin to the incumbent by more than 10% relative';
+    if (verdict === null && (id === 'C' || id === 'C2') && movedRows(PRICER_BY_ID.get(id)!) < 10)
+      verdict = 'rejected: it reprices fewer than 10 board rows by more than 5% — a win that changes nothing ships nothing';
+    if (verdict === null && mean > incumbentMean * (1 - margin))
+      verdict = `recorded as a tie: its mean win over the incumbent is inside the ${Math.round(margin * 100)}% margin — the incumbent stays`;
+    if (verdict === null) passers.push({ id, mean });
+    else verdictById.set(id, verdict);
   }
-  const hindShipped = hindcastGrades.find((h) => h.id === shippedId)!;
+  passers.sort((a, b) => a.mean - b.mean);
+  let shippedId = 'G';
+  let shippedMean = incumbentMean;
+  if (passers.length > 0) {
+    shippedId = passers[0]!.id;
+    shippedMean = passers[0]!.mean;
+    for (const p of passers)
+      verdictById.set(
+        p.id,
+        p.id === shippedId
+          ? 'ships: it clears the two-origin gate with the lowest mean'
+          : 'clears the two-origin gate, but another challenger grades lower and ships',
+      );
+  }
+  const gateVerdicts = ['I', 'J', 'M', 'N', 'O', 'C', 'C2'].map((id) => ({ id, verdict: verdictById.get(id)! }));
+  const hindShipped = originGrades[1]!.grades.find((g) => g.id === shippedId)!;
   const shippedErrors = graded.find((g) => g.id === shippedId)!.errors;
   const shippedMedFactor = Math.pow(10, median(shippedErrors.map((e) => Math.abs(e))));
   const hindTestFactor = hindShipped.median_error_factor;
+
+  // Proper log scores of the leave-one-out predictive distributions: the mean log density of
+  // the realised caps under a lognormal centred on each candidate's held-out prediction, with
+  // that candidate's own residual spread (the sample SD of its leave-one-out log residuals).
+  // A strictly proper rule: it grades centre and spread together and cannot be gamed by
+  // widening a band.
+  const logScores = graded.map((g) => {
+    const n = g.errors.length;
+    const mean = g.errors.reduce((s, e) => s + e, 0) / n;
+    const sigma = Math.sqrt(g.errors.reduce((s, e) => s + (e - mean) * (e - mean), 0) / Math.max(1, n - 1));
+    const mls =
+      sigma > 0 ? g.errors.reduce((s, e) => s + (-0.5 * Math.log(2 * Math.PI) - Math.log(sigma) - (e * e) / (2 * sigma * sigma)), 0) / n : 0;
+    return { id: g.id, mean_log_score: round4(mls), sigma: round4(sigma) };
+  });
 
   // Conformal bands from the shipped model's residuals: global, and per comp-TVL tercile.
   const ratios = shippedErrors.map((e) => Math.pow(10, e)).sort((a, b) => a - b);
@@ -867,16 +1159,17 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
 
   // The shipped fit's precision. A least-squares fit takes the analytic standard error and
   // R-squared; the median fit takes a jackknife standard error for its slope and the L1
-  // pseudo-R-squared (absolute deviation explained against the median cap) — each estimator
-  // graded in its own loss, and method.md says which is which.
-  const fit = fitShipped(comps, shippedId);
+  // pseudo-R-squared (absolute deviation explained against the median cap); the Huber fit and
+  // the blend jackknife their own refits — each estimator graded in its own loss, and
+  // method.md says which is which.
+  const fit = fitShipped(comps, shippedId, model);
   const xs = comps.map((p) => Math.log10(p.tvl_usd));
   const ys = comps.map((p) => Math.log10(p.mcap_usd!));
   const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
   const my = ys.reduce((s, v) => s + v, 0) / ys.length;
   let slopeCi95: [number, number];
   let r2: number;
-  if (shippedId === 'G') {
+  if (shippedId === 'G' || shippedId === 'M' || shippedId === 'N' || shippedId === 'O') {
     const thetas = comps.map((_, j) => fitCurveLAD(comps.filter((_, k) => k !== j)).slope);
     const tMean = thetas.reduce((s, v) => s + v, 0) / thetas.length;
     const varJack = thetas.length > 1 ? ((thetas.length - 1) / thetas.length) * thetas.reduce((s, t) => s + (t - tMean) * (t - tMean), 0) : 0;
@@ -889,6 +1182,18 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
       l1Fit += Math.abs(ys[i]! - (fit.intercept + fit.slope * x));
       l1Null += Math.abs(ys[i]! - medY);
     });
+    r2 = round4(l1Null > 0 ? 1 - l1Fit / l1Null : 0);
+  } else if (shippedId === 'I' || shippedId === 'J') {
+    // The Huber fit and the blend take a jackknife standard error over their own refits, and
+    // the L1 pseudo-R-squared over their leave-one-out residuals.
+    const thetas = comps.map((_, j) => fitShipped(comps.filter((_, k) => k !== j), shippedId, model).slope);
+    const tMean = thetas.reduce((s, v) => s + v, 0) / thetas.length;
+    const varJack = thetas.length > 1 ? ((thetas.length - 1) / thetas.length) * thetas.reduce((s, t) => s + (t - tMean) * (t - tMean), 0) : 0;
+    const se = Math.sqrt(varJack);
+    slopeCi95 = [round4(fit.slope - 1.96 * se), round4(fit.slope + 1.96 * se)];
+    const medY = median(ys);
+    const l1Fit = shippedErrors.reduce((s, e) => s + Math.abs(e), 0);
+    const l1Null = ys.reduce((s, y) => s + Math.abs(y - medY), 0);
     r2 = round4(l1Null > 0 ? 1 - l1Fit / l1Null : 0);
   } else {
     let ssRes = 0;
@@ -908,7 +1213,7 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
   return {
     comps: comps.length,
     selection_rule:
-      'leave-one-out grades every candidate; a rolling-origin hindcast (oldest two-thirds fit, newest third graded) decides what ships — adjustment terms, estimator, hybrid — so the split that chooses is not the split that calibrates the bands',
+      'leave-one-out grades every candidate and calibrates the bands; a two-origin hindcast (fit the oldest half, grade the next sixth; fit the oldest two-thirds, grade the newest third) decides what ships under a pre-registered gate — a challenger needs a 5% mean win over the incumbent across both origins (10% for the ensemble), no origin lost by over 10%, a stable coefficient sign for fitted terms, and real board impact for a category factor — so the split that chooses is not the split that calibrates the bands',
     candidates: graded.map((g) => ({
       id: g.id,
       label: g.label,
@@ -939,12 +1244,33 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
     rank_ic: round4(rankIc),
     decile_realized_multiples: deciles,
     hindcast: {
-      train_n: train.length,
-      test_n: test.length,
+      train_n: origins[1]!.train.length,
+      test_n: origins[1]!.test.length,
       test_median_error_factor: round4(hindTestFactor),
       drift: round4(shippedMedFactor > 0 ? hindTestFactor / shippedMedFactor : 0),
+      mean_median_error_factor: round4(shippedMean),
     },
-    hindcast_grades: hindcastGrades.map((g) => ({ id: g.id, median_error_factor: g.median_error_factor, within_2x_pct: g.within_2x_pct })),
+    hindcast_grades: CANDIDATES.map((c) => ({
+      id: c.id,
+      median_error_factor: factorAt(1, c.id),
+      within_2x_pct: originGrades[1]!.grades.find((g) => g.id === c.id)!.within_2x_pct,
+      origin1_median_error_factor: factorAt(0, c.id),
+      mean_median_error_factor: round4(meanFactor(c.id)),
+    })),
+    hindcast_origins: originGrades.map((o) => ({
+      label: o.label,
+      train_n: o.train.length,
+      test_n: o.test.length,
+      grades: o.grades.map((g) => ({ id: g.id, median_error_factor: g.median_error_factor, within_2x_pct: g.within_2x_pct })),
+    })),
+    fitted_coefficients: {
+      beta: [round4(originFits[0]!.beta), round4(originFits[1]!.beta)],
+      gamma: [round4(originFits[0]!.gamma), round4(originFits[1]!.gamma)],
+      theta: [round4(originFits[0]!.theta), round4(originFits[1]!.theta)],
+    },
+    adjustments,
+    gate_verdicts: gateVerdicts,
+    log_scores: logScores,
     thin_evidence_pct: 0,
   };
 }
@@ -963,17 +1289,41 @@ export function impliedValue(
   model: ModelConstants,
   fit: CurveFit,
   backtest: Backtest,
-): { implied: number; low: number; high: number; curve: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+): {
+  implied: number;
+  low: number;
+  high: number;
+  curve: number;
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  breadthMult: number;
+  adjMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const curve = curveValue(fit, protocol.tvl_usd);
-  // The shipped model is the plain curve (candidate B) unless the hindcast kept the adjustments.
-  const g = backtest.winner === 'E' ? growthMultiplier(protocol, model) : { pct: 0, mult: 1 };
-  const m = backtest.winner === 'E' ? maturityMultiplier(age, model) : 1;
-  const implied = Math.max(1, Math.round(curve * g.mult * m));
+  // The shipped model is the plain curve unless the gate kept an adjustment: radar-2's asserted
+  // terms under E, or the fitted one-coefficient terms under M (growth), N (growth x maturity)
+  // and O (breadth, in log space). The coefficients are the backtest's full-pool fits.
+  let g = { pct: 0, mult: 1 };
+  let m = 1;
+  let breadth = 1;
+  if (backtest.winner === 'E') {
+    g = growthMultiplier(protocol, model);
+    m = maturityMultiplier(age, model);
+  } else if (backtest.winner === 'M' || backtest.winner === 'N') {
+    const x = growthCovariate(protocol, model);
+    g = { pct: Math.min(model.growth_cap, Math.max(model.growth_floor, finite(protocol.change_7d, 0))), mult: Math.max(ADJ_FLOOR, 1 + backtest.adjustments.beta * x) };
+    if (backtest.winner === 'N') m = Math.max(ADJ_FLOOR, 1 + backtest.adjustments.gamma * ageFraction(protocol, asOf, model));
+  } else if (backtest.winner === 'O') {
+    breadth = Math.pow(10, backtest.adjustments.theta * breadthCovariate(protocol));
+  }
+  const implied = Math.max(1, Math.round(curve * g.mult * m * breadth));
   const factors = bandFactorsFor(protocol.tvl_usd, backtest);
   const low = Math.min(implied, Math.max(1, Math.round(implied * factors.lo)));
   const high = Math.max(implied, Math.round(implied * factors.hi));
-  return { implied, low, high, curve, growthPct: g.pct, growthMult: g.mult, maturityMult: m, age };
+  return { implied, low, high, curve, growthPct: g.pct, growthMult: g.mult, maturityMult: m, breadthMult: breadth, adjMult: g.mult * m * breadth, age };
 }
 
 /** The first word of a name, normalised: the stem the kinship flag compares. */
@@ -1041,7 +1391,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   const jackFits = comps.map((_, j) => fitShipped(comps.filter((_, k) => k !== j), backtest.winner));
   const fragilityOf = (s: (typeof scored)[number]): number => {
     const values = jackFits.map((f) => {
-      const v = curveValue(f, s.p.tvl_usd) * (backtest.winner === 'E' ? s.growthMult * s.maturityMult : 1);
+      const v = curveValue(f, s.p.tvl_usd) * s.adjMult;
       return v;
     }).sort((a, b) => a - b);
     const iqr = quantile(values, 0.75) - quantile(values, 0.25);

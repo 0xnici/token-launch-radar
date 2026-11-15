@@ -11,7 +11,7 @@
 miss ×3.82, ranking validated at Spearman IC 0.32. Entry for the make.fun
 bounty ["Build the best token launch radar"](https://make.fun/bounty/token-radar-01) (token-radar-01).
 
-## The model (radar-4)
+## The model (radar-5)
 
 ```
 implied = round( 10 ^ (4.5869 + 0.3135 x log10(TVL)) )
@@ -23,20 +23,30 @@ launch, not the average one, so a handful of extreme multiples cannot drag
 the curve. Nothing else moves a price — and that is a measured result, not
 a preference:
 
-- Eight candidate pricers were graded **leave-one-out** over the 92 comps
+- Fourteen candidate pricers were graded **leave-one-out** over the 92 comps
   (price each as if pre-token, from the other 91). radar-2's category
   multiple scored a median miss of ×4.91; the least-squares curve ×3.27;
-  the median curve ×3.82; a hybrid of per-category curves ×3.35.
-- Every keep-or-drop call was made **out-of-time**: a rolling-origin
-  hindcast (fit the oldest 47 dated comps, grade the newest 23). It struck
-  radar-2's growth/maturity adjustments in the previous round (×2.56 against
-  ×2.85). This round it chose the estimator: the median fit lost
-  leave-one-out and won the hindcast outright — ×2.07 against the
-  least-squares ×2.56, 43.5% against 39.1% priced within 2× — so the median
-  fit ships. The hybrid never stood apart out-of-time (its training era
-  holds no category with 12+ comps, so there it *is* the global curve) and
-  graded worse in-window, so it does not ship. Category factors lost in
-  every form tried.
+  the median curve ×3.82; a hybrid of per-category curves ×3.35; this
+  round's Huber fit ×3.49 and the two-curve ensemble ×3.51.
+- Every keep-or-drop call is made **out-of-time**, under a pre-registered
+  gate: a challenger ships only if it beats the incumbent's **two-origin
+  hindcast** mean (fit the oldest 35 dated comps, grade the next 12; fit
+  the oldest 47, grade the newest 23) by 5% or more — 10% for an ensemble —
+  losing neither origin by over 10%, with a stable coefficient sign where
+  it fits one. radar-4's hindcast chose the estimator itself: the median
+  fit won the newest era outright (×2.07 against the least-squares ×2.56).
+  This round six challengers faced the gate — a Huber robust fit, an
+  OLS+LAD ensemble, fitted growth/maturity/breadth terms, and the category
+  factor at two shrinkages — and none cleared it. The fitted growth term
+  came closest: it beat the incumbent at both origins by under 1.2%, a tie
+  inside the margin, and its full-pool coefficient flips sign against both
+  era fits — so the growth question is closed, published as a negative
+  result in [`docs/method.md`](docs/method.md). The incumbent's two-origin
+  mean is ×2.16.
+- The audit page also grades every candidate's whole held-out distribution
+  by a **proper log score** — a rule that cannot be gamed by widening a
+  band. The hybrid takes it by 0.002 over the shipped model (−1.249
+  against −1.251); the shipped model is second of fourteen.
 - Every row carries a **split-conformal band** (central 50%) built from the
   shipped model's held-out residuals, conditioned on TVL tercile. Achieved
   coverage: 51.1% at 50% nominal (47 of 92 launched peers inside), 81.5% at
@@ -90,11 +100,11 @@ byte-identical `board.json`, `data.js` and `dossier.json`.
 ## Layout
 
 - `main.ts` — entry point.
-- `lib/model.ts` — the radar-4 model: comp hygiene, the candidate backtest,
-  the hindcast, conformal bands, verdicts, farm plans, the exclusion audit.
+- `lib/model.ts` — the radar-5 model: comp hygiene, the candidate backtest,
+  the two-origin hindcast gate, conformal bands, verdicts, farm plans, the exclusion audit.
 - `vendor/makefun-board.ts` — the kit's dossier writer, unmodified.
 - `dashboard/` — the static dashboard (`index.html`, `app.css`, `app.js`).
-- `screenshots/` — the front page, a protocol detail view, the board
+- `screenshots/` — the board, a protocol detail view, the board
   filtered to CLOSE verdicts.
 - `docs/method.md` — the full method, with the real backtest numbers.
 

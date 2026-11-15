@@ -1,4 +1,4 @@
-# Method — how radar-4 prices a protocol that has no token yet
+# Method — how radar-5 prices a protocol that has no token yet
 
 This note records how the model in `lib/model.ts` was chosen, what it
 assumes, where it is known to be weak, and the checks the board had to pass.
@@ -7,7 +7,7 @@ nothing is hand-typed into the model.
 
 ## The stance: reference-class forecasting
 
-radar-4 prices the reference class, then publishes how the reference class
+radar-5 prices the reference class, then publishes how the reference class
 actually performed. The class is the snapshot's **clean comps**: tokenized
 protocols that pass the same hygiene as the board (no bridge / CEX /
 liquid-staking product categories, no versioned or wrapped variants, no
@@ -29,9 +29,9 @@ explains only a small share of what launched tokens trade at. The rest is
 dispersion, and the band (below) is where that dispersion is reported
 instead of hidden.
 
-## How the model was chosen: two splits, two decisions
+## How the model was chosen: two splits, then a gate
 
-Eight candidate pricers were fitted on the clean comps and graded
+Fourteen candidate pricers were fitted on the clean comps and graded
 **leave-one-out**: price each comp as if it were pre-token, from the other
 91, and compare with its recorded market cap.
 
@@ -45,44 +45,126 @@ Eight candidate pricers were fitted on the clean comps and graded
 | F — E, curve fitted to deflated caps | 0.5486 | ×3.54 | 38.0% | 46.7% |
 | G — size curve by median (LAD) regression | 0.5824 | ×3.82 | 38.0% | 45.7% |
 | H — hybrid: category curves ≥ 12 comps, shrunk; global else | 0.5251 | ×3.35 | 35.9% | 45.7% |
+| I — size curve by Huber regression (δ = 0.35) | 0.5426 | ×3.49 | 38.0% | 44.6% |
+| J — ensemble: mean of the OLS and LAD curves | 0.5452 | ×3.51 | 37.0% | 45.7% |
+| M — G × fitted growth term (one coefficient) | 0.5893 | ×3.88 | 37.0% | 45.7% |
+| N — M × fitted maturity term (one more coefficient) | 0.5612 | ×3.64 | 37.0% | 46.7% |
+| O — G × fitted breadth term (chain count, log space) | 0.5535 | ×3.58 | 37.0% | 47.8% |
+| C2 — B + category factor (strong shrinkage, k = 16) | 0.5661 | ×3.68 | 38.0% | 44.6% |
 
 Leave-one-out narrows the field — the curve family beats radar-2's multiple
 outright, and the category factor loses in every form tried (raw, shrunk
-toward 1 with k = 4 in James–Stein fashion, damped at γ = 0.5, clamped):
-once size is fitted, category medians mostly re-state size, and their noise
-costs more than their signal pays.
+toward 1 with k = 4 in James–Stein fashion, damped at γ = 0.5, clamped, and
+this round shrunk harder at k = 16): once size is fitted, category medians
+mostly re-state size, and their noise costs more than their signal pays.
 
 But leave-one-out is also the split the bands are calibrated on, so it does
 not get the final word on model shape — that would be selection leakage.
-Every keep-or-drop decision is made **out-of-time**, on a rolling-origin
-hindcast: fit on the oldest 47 dated comps, grade on the newest 23.
+Every keep-or-drop decision is made **out-of-time**, on rolling-origin
+hindcasts over the 70 dated comps. radar-3 ran the newest-third split on
+radar-2's adjustment terms: they helped in-window and hurt out-of-time
+(×2.85 against the plain curve's ×2.56), so they did not ship. radar-4 ran
+the same split on the estimator itself: the median fit (G) *lost*
+leave-one-out — ×3.82 against the least-squares ×3.27 — and *won* the
+hindcast outright, ×2.07 against ×2.56, with more of the newest era priced
+within 2× (43.5% against 39.1%). Least squares grades best on the era it
+was fitted in; the median grades best on the era that had not happened yet,
+and the board is priced for the second kind.
 
-| Hindcast (newest third) | Median miss | Within 2× |
-| --- | --- | --- |
-| B — plain curve (OLS) | ×2.56 | 39.1% |
-| E — curve × growth × maturity | ×2.85 | 26.1% |
-| G — median (LAD) curve | ×2.07 | 43.5% |
-| H — hybrid category curves | ×2.56 | 39.1% |
+### The round-5 gate: two origins, pre-registered margins
 
-radar-3 ran this split on the adjustment terms: they helped in-window and
-hurt out-of-time, so they did not ship. radar-4 ran the same split on the
-estimator itself. The median fit (G) *loses* leave-one-out — ×3.82 against
-the least-squares ×3.27 — and *wins* the hindcast outright, ×2.07 against
-×2.56, with more of the newest era priced within 2× (43.5% against 39.1%).
-So **candidate G ships**: the same rule that struck E in the last round
-struck B in this one, applied the same way. Least squares grades best on
-the era it was fitted in; the median grades best on the era that had not
-happened yet, and the board is priced for the second kind.
+One split can be lucky. radar-5 therefore re-ran the decision as a gate
+with the rules fixed before the fits: **two origins** — fit the oldest 35
+dated comps, grade the next 12 (origin 1); fit the oldest 47, grade the
+newest 23 (origin 2, radar-4's split). A challenger ships only if its
+two-origin mean median miss beats the incumbent's by **5% or more**
+relative (10% for the ensemble candidate), it loses **neither origin by
+more than 10%** relative, any coefficient it fits keeps the **same sign at
+both origins**, and a category factor additionally moves at least 10 board
+rows by more than 5%. A win inside the margin is recorded as a tie, and
+the incumbent stays. Six challengers were heard: the Huber fit and the
+ensemble (the estimator question, asked harder), the fitted growth and
+maturity terms (radar-2's struck adjustments, re-estimated honestly — one
+coefficient each, fitted by least squares on the training era's residuals,
+never hand-set), a fitted breadth term, and the category factor at a
+second, stronger shrinkage.
 
-The hybrid (H) is recorded as a rejection, not a near-miss: its hindcast
-training era holds no category with 12+ comps (the largest, Lending, has
-9), so out-of-time the hybrid *is* the global curve — its ×2.56 is B's
-number, not a tie it earned — and in-window it graded worse than B anyway
-(×3.35 against ×3.27). A category structure that only exists in the full
-pool cannot be validated out-of-time, so it does not ship.
+| Two-origin hindcast | Origin 1 (12) | Origin 2 (23) | Mean |
+| --- | --- | --- | --- |
+| A — radar-2 | ×6.40 | ×4.44 | ×5.42 |
+| B — OLS curve | ×2.00 | ×2.56 | ×2.28 |
+| C — B + category (k = 4) | ×2.00 | ×2.38 | ×2.19 |
+| D — C + growth | ×1.97 | ×2.38 | ×2.17 |
+| E — B × growth × maturity (asserted) | ×2.09 | ×2.85 | ×2.47 |
+| F — E on deflated caps | ×1.96 | ×3.09 | ×2.53 |
+| **G — LAD curve (incumbent)** | **×2.25** | **×2.07** | **×2.16** |
+| H — hybrid category curves | ×2.00 | ×2.56 | ×2.28 |
+| I — Huber curve | ×2.14 | ×2.40 | ×2.27 |
+| J — ensemble (OLS+LAD mean) | ×2.13 | ×2.30 | ×2.22 |
+| M — G × fitted growth | ×2.22 | ×2.07 | ×2.14 |
+| N — M × fitted maturity | ×2.23 | ×2.10 | ×2.17 |
+| O — G × fitted breadth | ×2.26 | ×2.49 | ×2.37 |
+| C2 — B + category (k = 16) | ×2.00 | ×2.50 | ×2.25 |
+
+**No challenger cleared the gate, so G ships unchanged** — this round is a
+methodology round, and the board is byte-identical to radar-4's. The
+verdicts, with the numbers that decided them:
+
+- **Huber (I)** interpolates exactly as theory says in-window (LOO ×3.49,
+  between B's ×3.27 and G's ×3.82) but loses origin 2 to the incumbent by
+  15.9% relative — outside the per-origin bound. Rejected.
+- **Ensemble (J)** — the average of the two curves — loses origin 2 by
+  11.2% and its mean (×2.22) is worse than the incumbent's (×2.16) before
+  its higher 10% bar is even applied. Averaging the estimators averages
+  away the median's newest-era edge. Rejected.
+- **Fitted growth (M)** is the round's honest near-miss, and it closes a
+  question. Fitted per era, β = +0.20 (origin 1) and +1.49 (origin 2) —
+  same sign, no kill — and M beats the incumbent at *both* origins, by
+  1.2% and 0.1%: a mean win of 0.7%, inside the 5% margin, recorded as a
+  tie. Two further facts say the tie is the right call: the full-pool fit
+  of the same coefficient is β = −0.50, opposite in sign to both era fits,
+  and M's leave-one-out grade (×3.88) is the worst of the curve family.
+  **The growth question is closed**: fitted honestly, at the resolution
+  this snapshot affords, 7-day momentum does not price launches. It stays
+  on the page as context and will not be refitted next round.
+- **Fitted maturity (N)** dies on the sign rule: γ = +0.081 at origin 1,
+  −0.045 at origin 2. A coefficient that flips sign between adjacent eras
+  is era noise, not signal. **The maturity question is closed** on the
+  same terms; age stays a display percentile.
+- **Fitted breadth (O)** dies on the same rule: θ = +0.012 at origin 1,
+  −0.169 at origin 2. Chain count stays display-only, permanently.
+- **Category (C, C2)** had its hearing at both shrinkages: each beats the
+  incumbent at origin 1 and loses origin 2 by 15–21%. Under the gate's
+  board-impact rule the question never even reached materiality — the
+  per-origin loss decided it first. Category prices nothing, at any
+  shrinkage tried.
+
+A pattern worth recording: at origin 1 the incumbent is beaten by eleven
+of its thirteen challengers; at origin 2 — the newest era — it is beaten
+by none beyond a tie. Every challenger that looks better on the older
+split gives it back on the newer one. That asymmetry is the reason the
+gate has two origins.
+
+The hybrid (H) remains a rejection, not a near-miss: its hindcast training
+eras hold no category with 12+ comps (the largest, Lending, has 9), so
+out-of-time the hybrid *is* the global curve — its origin grades are B's
+numbers, not ties it earned — and in-window it graded worse than B anyway.
+
+### The whole distribution, graded: proper log score
+
+Median miss grades a point. The audit page also grades each candidate's
+whole predictive distribution — the fitted curve plus a Gaussian spread
+set by its own leave-one-out residual dispersion — under a **proper log
+score** (mean held-out log predictive density; higher is better; a proper
+rule cannot be gamed by widening a band). The hybrid takes it, −1.2494
+against the shipped model's −1.2510 — a margin of 0.002, inside any
+reasonable noise — with the breadth term third (−1.2546) and the
+least-squares curve sixth (−1.2617). radar-2's full model is last by a
+wide margin (−1.3913). The shipped model is second of fourteen on the
+score that grades everything it claims, centre and spread together.
 
 The shipped model's leave-one-out median miss is ×3.82 (drift to the
-hindcast era: ×0.54 — the newest era graded much kinder than the in-window
+origin-2 era: ×0.54 — the newest era graded much kinder than the in-window
 average, which is itself a measure of how much the era matters).
 
 ## The band: split-conformal, conditioned on size
@@ -231,7 +313,7 @@ they appear; they never touch the ranked value.
   contribution is the calibrated values, bands and verdicts, and it does
   not pretend otherwise. The whole board implies $1,867,860,613.
 - **Caps.** The dashboard's source stays under the dossier's text cap
-  (54,796 B against 65,536 B) and each screenshot under its cap (all three
+  (56,163 B against 65,536 B) and each screenshot under its cap (all three
   are 1440×900 and below 512 KiB).
 
 ## What would change the ranking
