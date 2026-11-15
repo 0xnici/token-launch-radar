@@ -1,8 +1,8 @@
 // Token Launch Radar — the dashboard. Static, no network: everything renders from window.RADAR
-// (data.js, written by main.ts from the same model that writes board.json). The model is radar-3:
-// one fitted size curve from the snapshot's clean traded comps, chosen by a leave-one-out
-// backtest and an out-of-time hindcast, with split-conformal bands. The page recomputes every
-// row's implied value from the published fit and says whether it agrees with board.json.
+// (data.js, written by main.ts from the same model that writes board.json). The model is radar-4:
+// one fitted size curve from the snapshot's clean traded comps — the median (LAD) fit, chosen
+// over the least-squares fit by an out-of-time hindcast — with split-conformal bands. The page
+// recomputes every row's implied value from the published fit and says whether it agrees.
 'use strict';
 
 const R = window.RADAR;
@@ -79,13 +79,16 @@ function farmSteps(r) {
 }
 
 /* ---------- masthead ---------- */
-function masthead(active) {
+function masthead(active, compact) {
   const bias = BT.residual_quantiles.p50;
   const nav = [['#/', 'Front page'], ['#/board', 'The board'], ['#/wall', 'Category wall'], ['#/audit', 'Audit & model card'], ['#/live', 'Live tokens']]
     .map(([h, t]) => `<a href="${h}" ${active === h ? 'aria-current="page"' : ''}>${t}</a>`).join('');
-  return `<div class="shell">
+  const head = `<div class="shell">
   <div class="top"><div class="brand"><div class="mark"></div><div class="brand-name">Token Launch Radar</div></div>
   <div class="top-meta"><span>model ${esc(R.model_version)}</span><span>snapshot ${esc(R.as_of)}</span><span>${esc(R.source)}</span></div></div>
+  <p class="tagline">Fitted on the <b>${BT.comps} that launched</b>. Honest about the <b>${R.board_size} that haven't</b>.</p>`;
+  if (compact) return `${head}<nav class="nav slim">${nav}</nav>`;
+  return `${head}
   <p class="thesis">${R.board_size} protocols with no token, priced by <em>one fitted size curve</em> learned from
   ${BT.comps} launched peers — and published with its own measured error: median blind miss
   <span class="amber">×${BT.candidates.find((c) => c.winner).median_error_factor}</span>, ranking validated at
@@ -155,8 +158,9 @@ function frontPage() {
     <p class="sub">Split-conformal bands from leave-one-out residuals: coverage is a construction property, and the achieved column is the receipt.</p></section>
     <section class="panel"><h2>The backtest that chose this model</h2>
     <table class="mini-table"><thead><tr><th>Cand.</th><th class="r">Med miss</th><th class="r">≤2×</th><th class="r">≤3×</th></tr></thead><tbody>${cand}</tbody></table>
-    <p class="sub">◆ ships. Leave-one-out graded all six; the <b>hindcast</b> (fit oldest ${BT.hindcast.train_n}, grade newest ${BT.hindcast.test_n})
-    struck the growth and maturity terms: out-of-time error ×${BT.hindcast.test_median_error_factor}, drift ×${BT.hindcast.drift} against the in-window grade.</p></section>
+    <p class="sub">◆ ships. Leave-one-out graded all ${BT.candidates.length}; the <b>hindcast</b> (fit oldest ${BT.hindcast.train_n}, grade newest ${BT.hindcast.test_n})
+    struck the growth and maturity terms, then chose the median fit over the least-squares fit — out-of-time ×${BT.hindcast.test_median_error_factor}
+    against ×${BT.hindcast_grades.find((g) => g.id === 'B').median_error_factor}, drift ×${BT.hindcast.drift} against the in-window grade.</p></section>
     <section class="panel"><h2>Rank validation</h2>
     <p class="sub" style="margin-top:0">The product is a ranking, so the ranking is what we validate: Spearman IC
     <b class="num" style="color:var(--ink)">${BT.rank_ic}</b> between held-out predicted and actual ranks of the ${BT.comps} comps.
@@ -168,10 +172,20 @@ function frontPage() {
 
 /* ---------- the board ---------- */
 const boardState = { q: '', category: 'all', verdict: 'all', sort: 'rank', flagged: false };
+/* Filters can be linked: ?verdict=CLOSE&category=Lending&sort=hurdle&flagged=1#/board seeds the
+   board's state, so a filtered view is a URL, not a session. Unknown values are ignored. */
+try {
+  const q = new URLSearchParams(location.search);
+  if (['PAYS', 'CLOSE', 'SHORT'].includes(q.get('verdict'))) boardState.verdict = q.get('verdict');
+  if (q.get('category')) boardState.category = q.get('category');
+  if (['rank', 'tvl', 'hurdle', 'ev', 'misprice'].includes(q.get('sort'))) boardState.sort = q.get('sort');
+  if (q.get('q')) boardState.q = q.get('q').toLowerCase();
+  if (q.get('flagged') === '1') boardState.flagged = true;
+} catch (e) { /* no query string: the defaults stand */ }
 function boardPage() {
   const cats = [...new Set(R.rows.map((r) => r.category || '—'))].sort();
   const opts = cats.map((c) => `<option value="${esc(c)}" ${boardState.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
-  return `${masthead('#/board')}
+  return `${masthead('#/board', true)}
   <div class="controls">
     <div class="field"><label for="q">Search</label><input type="search" id="q" value="${esc(boardState.q)}" placeholder="protocol name"></div>
     <div class="field"><label for="fc">Category</label><select id="fc"><option value="all">All categories</option>${opts}</select></div>
@@ -189,7 +203,8 @@ function boardPage() {
     <tbody id="brows"></tbody></table></div>
   <p class="sub">Hurdle = the share of the bear value, in basis points, that must reach the farming side for a $1,000 reference plan to break even;
   typical community allocations run 500–1,500 bps. Base rate = the category's tokenization rate (shrunk), context only — it never moves a price.
-  The EV sort multiplies implied by that base rate: a labelled secondary view, not the ranking.</p></section>${foot}`;
+  The EV sort multiplies implied by that base rate: a labelled secondary view, not the ranking. Filters are linkable — this view, for instance, is
+  <span class="num">?verdict=CLOSE#/board</span>.</p></section>${foot}`;
 }
 function renderBoardRows() {
   const catMult = new Map(R.categories.map((c) => [c.category, c.median_multiple]));
@@ -228,64 +243,77 @@ function bindRowClicks() {
 /* ---------- detail ---------- */
 function tile(label, value, note) {
   const bar = value == null ? '<div class="bar"></div>' : `<div class="bar"><i style="width:${value}%"></i><span class="dot"></span></div>`;
-  return `<div class="tile"><span>${label} · within category</span>${bar}<b>${value == null ? 'n/a' : value}</b> <span style="text-transform:none;letter-spacing:0">${note || ''}</span></div>`;
+  return `<div class="tile"><span>${label}</span>${bar}<b>${value == null ? 'n/a' : value}</b> <span style="text-transform:none;letter-spacing:0">${note || ''}</span></div>`;
 }
 function detailPage(r) {
   const check = recompute(r.tvl_usd);
   const agree = check === r.implied_value_usd;
   const f = bandFactors(r.tvl_usd);
   const grade = catGrade.get(r.category || '') || 'C';
-  const cat = R.categories.find((c) => c.category === (r.category || ''));
   const concerns = r.concerns.map((c) => `<div class="concern">⚑ ${esc(c)}. The flag is mechanical and never changes the ranked value.</div>`).join('');
   const contested = r.contested ? `<div class="concern">◆ Contested: the 8 nearest traded neighbours by size carry a median market cap
     ${r.neighbour_ratio}× this row's curve price. The curve price stands; the disagreement is shown, not averaged away.</div>` : '';
   const steps = farmSteps(r).map(([t, c]) => `<li>${esc(t)}<span class="cost">Cost/time: ${esc(c)}.</span></li>`).join('');
   const torn = [
     ['TVL +20%', curve(r.tvl_usd * 1.2)], ['TVL −20%', curve(r.tvl_usd * 0.8)],
-    [`exponent at CI high (${BT.curve_slope_ci95[1]})`, Math.pow(10, BT.curve_intercept + BT.curve_slope_ci95[1] * Math.log10(r.tvl_usd))],
-    [`exponent at CI low (${BT.curve_slope_ci95[0]})`, Math.pow(10, BT.curve_intercept + BT.curve_slope_ci95[0] * Math.log10(r.tvl_usd))],
+    [`slope CI high (${BT.curve_slope_ci95[1]})`, Math.pow(10, BT.curve_intercept + BT.curve_slope_ci95[1] * Math.log10(r.tvl_usd))],
+    [`slope CI low (${BT.curve_slope_ci95[0]})`, Math.pow(10, BT.curve_intercept + BT.curve_slope_ci95[0] * Math.log10(r.tvl_usd))],
   ].map(([label, v]) => ({ label, v, swing: Math.abs(Math.log10(v / r.implied_value_usd)) })).sort((a, b) => b.swing - a.swing);
   const maxSwing = Math.max(...torn.map((t) => t.swing));
   const tornado = torn.map((t) => `<div class="bar-row"><span class="lab">${esc(t.label)}</span>
     <span class="tr"><i style="left:${t.v >= r.implied_value_usd ? 50 : 50 - (t.swing / maxSwing) * 48}%;width:${(t.swing / maxSwing) * 48}%"></i></span>
     <span class="val">${moneyShort(t.v)}</span></div>`).join('');
   const hurdlePct = Math.min(100, (r.hurdle_bps / 3000) * 100);
-  return `${masthead('')}
-  <p style="margin-top:14px"><a href="#/board">← the board</a></p>
-  <h1 style="font-size:24px;margin:4px 0 2px">${esc(r.name)} ${flags(r)}</h1>
-  <p class="sub" style="margin:0 0 6px">rank #${r.rank} of ${R.board_size} · ${esc(r.category || '—')} · evidence grade <span class="grade ${grade}">${grade}</span>
-  · #${r.category_board_rank} in its category, ${r.category_tvl_share_pct}% of category TVL · ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}: ${esc(r.chains.join(', '))}</p>
+  const inBand = Math.round(BT.calibration[0].achieved_pct * BT.comps / 100);
+  return `${masthead('', true)}<div class="detail">
+  <p class="crumb"><a href="#/board">← the board</a></p>
+  <h1>${esc(r.name)} ${flags(r)}</h1>
+  <p class="sub dsub">rank #${r.rank} of ${R.board_size} · ${esc(r.category || '—')} · evidence grade <span class="grade ${grade}">${grade}</span>
+  · #${r.category_board_rank} in its category, ${r.category_tvl_share_pct}% of category TVL · ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}: ${esc(r.chains.join(', '))}
+  · ${r.age_days == null ? 'age unknown' : commas(r.age_days) + ' days old'} · TVL rank #${r.tvl_rank} vs implied #${r.rank}</p>
   ${concerns}${contested}
   <section class="panel"><h2>Why this rank — the whole arithmetic</h2>
+    <div class="wgrid"><div class="wleft">
     <div class="water">
       <div class="wstep"><span>TVL (snapshot)</span><b>${money(r.tvl_usd)}</b></div><div class="wop">→</div>
-      <div class="wstep"><span>Size curve 10^(${BT.curve_intercept} + ${BT.curve_slope}·log₁₀TVL)</span><b>${money(Math.round(curve(r.tvl_usd)))}</b></div><div class="wop">=</div>
+      <div class="wstep"><span>Median size curve 10^(${BT.curve_intercept} + ${BT.curve_slope}·log₁₀TVL)</span><b>${money(Math.round(curve(r.tvl_usd)))}</b></div><div class="wop">=</div>
       <div class="wstep imp"><span>Implied value</span><b>${money(r.implied_value_usd)}</b></div>
     </div>
-    ${bandBar(r)}<div class="band-num">bear ${money(r.implied_low_usd)} (×${f.lo}) · base ${money(r.implied_value_usd)} · bull ${money(r.implied_high_usd)} (×${f.hi}) — split-conformal, TVL-tercile band</div>
-    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00. The shipped model carries no judgement terms:
-    the growth and maturity multipliers radar-2 used (a combined ×0.42–×1.60 range) were struck by the out-of-time hindcast.
-    100% of this price is the fitted reference class. Page recompute: ${money(check)} — ${agree ? 'agrees with board.json to the dollar' : 'differs from board.json; the board value stands'}.</div>
+    ${bandBar(r)}<div class="band-num">bear ${money(r.implied_low_usd)} (×${f.lo}) · base ${money(r.implied_value_usd)} · bull ${money(r.implied_high_usd)} (×${f.hi}) — split-conformal, TVL-tercile band.
+    In the backtest, ${inBand} of ${BT.comps} launched peers landed inside their central band — a band this wide is a coin the model has already flipped ${BT.comps} times.</div>
+    </div>
+    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00. No judgement terms ship: the hindcast struck
+    radar-2's growth/maturity multipliers (×0.42–×1.60 combined), then chose this median fit over least squares. 100% of this price is
+    the fitted reference class. Page recompute: ${money(check)} — ${agree ? 'agrees with board.json to the dollar' : 'differs from board.json; the board value stands'}.</div>
+    </div>
   </section>
-  <div class="grid2">
-    <section class="panel"><h2>Factor tiles — context, not model inputs</h2>
-      <div class="tiles">
+  <div class="dcols">
+    <section class="panel"><h2>Factor tiles — context, not inputs</h2>
+      <div class="tiles d2">
         ${tile('Size', r.factors.size, 'TVL percentile')}
         ${tile('Momentum', r.factors.momentum, '7d change percentile')}
         ${tile('Maturity', r.factors.maturity, 'age percentile')}
         ${tile('Breadth', r.factors.breadth, 'chain-count percentile')}
       </div>
-      <p class="sub">Percentiles within ${esc(r.category || 'the category')}; the dot marks the category median. None of these move the price — the hindcast struck the ones that tried.</p>
+      <p class="sub">Within-category percentiles; the dot is the category median. Context only — none move the price.</p>
       <dl class="kv">
-        <dt>Age</dt><dd>${r.age_days == null ? 'unknown' : commas(r.age_days) + ' days'}</dd>
         <dt>Capital velocity</dt><dd>${r.capital_velocity_usd_day == null ? 'n/a' : money(r.capital_velocity_usd_day) + ' / day'}</dd>
         <dt>Implied 7d inflow</dt><dd>${r.inflow_7d_usd == null ? 'n/a' : signed(r.inflow_7d_usd)}</dd>
         <dt>Category base rate</dt><dd>${(r.category_base_rate * 100).toFixed(1)}% tokenized (shrunk)</dd>
-        <dt>Jackknife fragility</dt><dd>${r.fragility} (IQR / base)${r.thin_evidence ? ' · thin evidence ⚠' : ''}</dd>
-        <dt>TVL rank vs implied rank</dt><dd>#${r.tvl_rank} vs #${r.rank}</dd>
+        <dt>Jackknife fragility</dt><dd>${r.fragility} IQR/base${r.thin_evidence ? ' · thin ⚠' : ''}</dd>
       </dl></section>
+    <section class="panel"><h2>Sensitivity — what moves this price</h2>${tornado}
+      <p class="sub">Each bar: implied value under that single change.</p>
+      <h2 style="margin-top:12px">Stress this row</h2>
+      <label class="sub" for="stress">TVL stress: <span id="stressVal" class="num" style="color:var(--ink)">+0%</span></label>
+      <input type="range" id="stress" min="-50" max="100" value="0" step="5">
+      <dl class="kv"><dt>Stressed TVL</dt><dd id="sTvl">${money(r.tvl_usd)}</dd>
+      <dt>Stressed implied</dt><dd id="sImp">${money(r.implied_value_usd)}</dd>
+      <dt>Stressed band</dt><dd id="sBand">${money(r.implied_low_usd)} – ${money(r.implied_high_usd)}</dd>
+      <dt>Stressed hurdle</dt><dd id="sHurdle">${commas(r.hurdle_bps)} bps</dd></dl>
+      <p class="sub">Live recompute from the published fit.</p></section>
     <section class="panel"><h2>The plan, graded</h2>
-      <p style="margin-top:0">${chip(r.verdict)} <span class="sub">for a $1,000 reference position, proceeds netted at a labelled 10% community-allocation scenario, pro-rata by TVL</span></p>
+      <p style="margin-top:0">${chip(r.verdict)} <span class="sub">for a $1,000 reference position at a labelled 10% allocation scenario, pro-rata by TVL</span></p>
       <dl class="kv">
         <dt>Net at bear</dt><dd>${signed(r.net_bear_usd)}</dd>
         <dt>Net at base</dt><dd>${signed(r.net_base_usd)}</dd>
@@ -293,26 +321,13 @@ function detailPage(r) {
       </dl>
       <p class="sub" style="margin-bottom:2px">Farmer's hurdle — the share of the bear value that must reach the farming side to break even:</p>
       <div class="gauge"><div class="zone" style="left:${(500 / 3000) * 100}%;width:${(1000 / 3000) * 100}%"></div><div class="mark2" style="left:${hurdlePct}%"></div></div>
-      <p class="sub" style="margin-top:0"><span class="num" style="color:var(--amber)">${commas(r.hurdle_bps)} bps</span> · green zone = the typical 500–1,500 bps community-allocation range (a labelled assumption, not snapshot data)</p>
-      <table class="mini-table"><thead><tr><th>EV per $1,000 at base</th><th class="r">5% alloc</th><th class="r">10%</th><th class="r">15%</th></tr></thead>
-      <tbody><tr><td>gross proceeds</td><td class="r num">${money(r.ev_per_1k_usd[0])}</td><td class="r num">${money(r.ev_per_1k_usd[1])}</td><td class="r num">${money(r.ev_per_1k_usd[2])}</td></tr></tbody></table>
+      <p class="sub" style="margin-top:0"><span class="num" style="color:var(--amber)">${commas(r.hurdle_bps)} bps</span> · green = the typical 500–1,500 bps allocation range (a labelled assumption)</p>
+      <table class="mini-table"><thead><tr><th>EV per $1,000</th><th class="r">5%</th><th class="r">10%</th><th class="r">15%</th></tr></thead>
+      <tbody><tr><td>gross proceeds at base</td><td class="r num">${money(r.ev_per_1k_usd[0])}</td><td class="r num">${money(r.ev_per_1k_usd[1])}</td><td class="r num">${money(r.ev_per_1k_usd[2])}</td></tr></tbody></table>
     </section>
   </div>
-  <div class="grid2">
-    <section class="panel"><h2>Sensitivity — what would move this price</h2>${tornado}
-      <p class="sub">Bars are implied value under each single change, sorted by swing. Nothing else is in the model to move.</p></section>
-    <section class="panel"><h2>Stress this row</h2>
-      <label class="sub" for="stress">TVL stress: <span id="stressVal" class="num" style="color:var(--ink)">+0%</span></label>
-      <input type="range" id="stress" min="-50" max="100" value="0" step="5">
-      <dl class="kv"><dt>Stressed TVL</dt><dd id="sTvl">${money(r.tvl_usd)}</dd>
-      <dt>Stressed implied</dt><dd id="sImp">${money(r.implied_value_usd)}</dd>
-      <dt>Stressed band</dt><dd id="sBand">${money(r.implied_low_usd)} – ${money(r.implied_high_usd)}</dd>
-      <dt>Stressed hurdle</dt><dd id="sHurdle">${commas(r.hurdle_bps)} bps</dd></dl>
-      <p class="sub">Live recompute from the published fit and this row's own band factors. The momentum slider a radar-2 page
-      would offer is absent on purpose: the shipped model has no momentum term for it to move.</p></section>
-  </div>
-  <section class="panel"><h2>The farm plan — six steps</h2><ol class="steps">${steps}</ol></section>
-  ${foot}`;
+  <section class="panel"><h2>The farm plan — six steps</h2><ol class="steps grid3">${steps}</ol></section>
+  </div>${foot}`;
 }
 
 /* ---------- category wall ---------- */
@@ -347,7 +362,7 @@ function wallPage() {
     <td class="r num">×${c.median_multiple}</td><td class="r num">${c.board_rows}</td><td class="r num">${moneyShort(c.pretoken_tvl_usd)}</td>
     <td class="r num ${c.aggregate_change_7d == null ? '' : c.aggregate_change_7d >= 0 ? 'pos' : 'neg'}">${pct(c.aggregate_change_7d)}</td>
     <td class="r num">${c.loo_median_error_factor == null ? '—' : '×' + c.loo_median_error_factor}</td><td class="r num">${c.contested_share_pct}%</td></tr>`).join('');
-  return `${masthead('#/wall')}
+  return `${masthead('#/wall', true)}
   <section class="panel"><h2>Category wall — one gestalt, identical axes everywhere</h2>
   <p class="sub" style="margin-top:0">Every panel shares the same log–log axes: TVL → value. Cyan dots are the category's traded comps at their real
   market caps; amber dots are its pre-token rows at the curve's price; the line is the one fitted curve — the same line in every panel,
@@ -363,8 +378,10 @@ function wallPage() {
 
 /* ---------- audit & model card ---------- */
 function auditPage() {
-  const cand = BT.candidates.map((c) => `<tr${c.winner ? ' style="color:var(--signal)"' : ''}><td>${c.id} — ${esc(c.label)}${c.winner ? ' ◆ ships' : ''}</td>
-    <td class="r num">×${c.median_error_factor}</td><td class="r num">${c.within_2x_pct}%</td><td class="r num">${c.within_3x_pct}%</td></tr>`).join('');
+  const hind = new Map(BT.hindcast_grades.map((g) => [g.id, g]));
+  const cand = BT.candidates.map((c) => { const h = hind.get(c.id); return `<tr${c.winner ? ' style="color:var(--signal)"' : ''}><td>${c.id} — ${esc(c.label)}${c.winner ? ' ◆ ships' : ''}</td>
+    <td class="r num">×${c.median_error_factor}</td><td class="r num">${c.within_2x_pct}%</td><td class="r num">${c.within_3x_pct}%</td>
+    <td class="r num">${h ? '×' + h.median_error_factor : '—'}</td><td class="r num">${h ? h.within_2x_pct + '%' : '—'}</td></tr>`; }).join('');
   const reasons = {};
   for (const e of R.audit.excluded) reasons[e.reason] = (reasons[e.reason] || 0) + 1;
   const reasonRows = Object.entries(reasons).sort((a, b) => b[1] - a[1])
@@ -372,22 +389,28 @@ function auditPage() {
   const excl = R.audit.excluded.map((e) => `<tr><td>${esc(e.name)}</td><td class="cat">${esc(e.category || '—')}</td>
     <td class="r num">${moneyShort(e.tvl_usd)}</td><td class="cat">${esc(e.reason)}</td></tr>`).join('');
   const largest = R.audit.largest_excluded;
-  return `${masthead('#/audit')}
+  return `${masthead('#/audit', true)}
   <section class="panel"><h2>Model card</h2>
   <dl class="kv">
     <dt>Intended use</dt><dd style="text-align:left;font-family:var(--font)">Ranking pre-token protocols by a fitted reference class, with calibrated uncertainty, for research and farm planning.</dd>
     <dt>Out of scope</dt><dd style="text-align:left;font-family:var(--font)">Investment advice, price prediction for any named protocol, and any use of the verdict as a promise of an airdrop.</dd>
     <dt>Training data</dt><dd>${BT.comps} clean traded comps from the sealed snapshot (of ${R.headline.protocol_total} protocols)</dd>
-    <dt>Method</dt><dd style="text-align:left;font-family:var(--font)">Reference-class forecasting: fit log₁₀(mcap) = ${BT.curve_intercept} + ${BT.curve_slope}·log₁₀(TVL) on the class, ship it unadjusted, publish its record. Bands are split-conformal (finite-sample corrected) on held-out residuals, by TVL tercile — coverage holds by construction under exchangeability of the comps.</dd>
-    <dt>Exponent in context</dt><dd>b = ${BT.curve_slope}, 95% CI [${BT.curve_slope_ci95[0]}, ${BT.curve_slope_ci95[1]}], R² ${BT.curve_r2} — far under a pure Metcalfe exponent of 2, inside the empirical range for network-value fits</dd>
+    <dt>Method</dt><dd style="text-align:left;font-family:var(--font)">Reference-class forecasting: fit log₁₀(mcap) = ${BT.curve_intercept} + ${BT.curve_slope}·log₁₀(TVL) on the class
+    ${BT.winner === 'G' ? 'by median (least-absolute-deviations) regression — the typical launch, not the average one —' : 'by least squares —'}
+    ship it unadjusted, publish its record. Bands are split-conformal (finite-sample corrected) on held-out residuals, by TVL tercile — coverage holds by construction under exchangeability of the comps.</dd>
+    <dt>Exponent in context</dt><dd>b = ${BT.curve_slope}, 95% CI [${BT.curve_slope_ci95[0]}, ${BT.curve_slope_ci95[1]}]${BT.winner === 'G' ? ' (jackknife)' : ''}, ${BT.winner === 'G' ? 'L1 pseudo-R²' : 'R²'} ${BT.curve_r2} — far under a pure Metcalfe exponent of 2, inside the empirical range for network-value fits</dd>
     <dt>Named failure modes</dt><dd style="text-align:left;font-family:var(--font)">${BT.thin_evidence_pct}% of rows sit in categories with thin traded evidence; TVL is a single point in time and can be rented;
     pre-token markets historically overprice launches (pre-market marks have run ≈2.4× launch FDV in known cases); the ranking's IC is ${BT.rank_ic}, a weak-to-moderate signal, and decile realized multiples are noisy — read the band, not the point.</dd>
   </dl></section>
   <section class="panel"><h2>Full backtest — every candidate, both splits</h2>
-  <div class="table-wrap"><table><thead><tr><th>Candidate</th><th class="r">LOO med miss</th><th class="r">≤2×</th><th class="r">≤3×</th></tr></thead><tbody>${cand}</tbody></table></div>
-  <p class="sub">Selection discipline: leave-one-out graded the field; the growth/maturity keep-or-drop was decided on the out-of-time hindcast
-  (fit oldest ${BT.hindcast.train_n} dated comps, grade newest ${BT.hindcast.test_n}: shipped model ×${BT.hindcast.test_median_error_factor},
-  drift ×${BT.hindcast.drift}) — never on the split that calibrates the bands. Category factors (C, D) lost in every form:
+  <div class="table-wrap"><table><thead><tr><th>Candidate</th><th class="r">LOO med miss</th><th class="r">≤2×</th><th class="r">≤3×</th><th class="r">Hindcast miss</th><th class="r">Hindcast ≤2×</th></tr></thead><tbody>${cand}</tbody></table></div>
+  <p class="sub">Selection discipline: leave-one-out graded the field; every keep-or-drop was decided on the out-of-time hindcast
+  (fit oldest ${BT.hindcast.train_n} dated comps, grade newest ${BT.hindcast.test_n}) — never on the split that calibrates the bands.
+  The growth/maturity terms (E) won leave-one-out and lost out-of-time, so they do not ship. The median fit (G) lost leave-one-out
+  (×${BT.candidates.find((c) => c.id === 'G').median_error_factor} against the least-squares ×${BT.candidates.find((c) => c.id === 'B').median_error_factor})
+  and won the hindcast (×${BT.hindcast.test_median_error_factor} against ×${BT.hindcast_grades.find((g) => g.id === 'B').median_error_factor}), so it ships:
+  the same rule, applied the same way, both rounds. The hybrid (H) never stood apart out-of-time — its train era holds no category
+  with 12+ comps, so there it is the global curve itself, and in-window it graded worse. Category factors (C, D) lost in every form:
   shrunk toward 1 with k = 4 and damped at γ = 0.5, they still cost more out-of-sample than they pay.</p></section>
   <section class="panel"><h2>Exclusion audit — all ${R.audit.excluded.length} turned away, with reasons</h2>
   <table class="mini-table"><tbody>${reasonRows}</tbody></table>
@@ -404,7 +427,7 @@ function livePage() {
     <td class="r num">${moneyShort(p.tvl_usd)}</td><td class="r num" style="color:var(--ink)">${moneyShort(p.mcap_usd)}</td>
     <td class="r num ${p.change_7d == null ? '' : p.change_7d >= 0 ? 'pos' : 'neg'}">${pct(p.change_7d)}</td>
     <td class="cat">${esc(p.chains.slice(0, 3).join(', '))}</td></tr>`).join('');
-  return `${masthead('#/live')}
+  return `${masthead('#/live', true)}
   <section class="panel"><h2>Live tokens — the evidence base, at the market's own values</h2>
   <p class="sub" style="margin-top:0">These protocols already trade; nothing here is modelled. The largest are shown; the fitted curve
   was learned from the ${BT.comps} clean comps among them.</p>

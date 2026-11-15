@@ -4,32 +4,43 @@
 [![rank](https://make.fun/badge/token-radar-01/Dimzy14/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/Dimzy14/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
+**Fitted on the 92 that launched. Honest about the 198 that haven't.**
+
 198 protocols with no token, priced by **one fitted size curve** learned from
 92 launched peers — and published with its own measured error: median blind
-miss ×3.27, ranking validated at Spearman IC 0.28. Entry for the make.fun
+miss ×3.82, ranking validated at Spearman IC 0.32. Entry for the make.fun
 bounty ["Build the best token launch radar"](https://make.fun/bounty/token-radar-01) (token-radar-01).
 
-## The model (radar-3)
+## The model (radar-4)
 
 ```
-implied = round( 10 ^ (3.9578 + 0.394 x log10(TVL)) )
+implied = round( 10 ^ (4.5869 + 0.3135 x log10(TVL)) )
 ```
 
-One OLS fit on the snapshot's clean traded comps (tokenized protocols that
-pass the board's own hygiene). Nothing else moves a price — and that is a
-measured result, not a preference:
+One **median (least-absolute-deviations) fit** on the snapshot's clean traded
+comps (tokenized protocols that pass the board's own hygiene) — the typical
+launch, not the average one, so a handful of extreme multiples cannot drag
+the curve. Nothing else moves a price — and that is a measured result, not
+a preference:
 
-- Six candidate pricers were graded **leave-one-out** over the 92 comps
+- Eight candidate pricers were graded **leave-one-out** over the 92 comps
   (price each as if pre-token, from the other 91). radar-2's category
-  multiple scored a median miss of ×4.91; the plain curve ×3.27; the curve
-  with radar-2's growth/maturity adjustments ×3.05.
-- The keep-or-drop call on those adjustments was made **out-of-time**: a
-  rolling-origin hindcast (fit the oldest 47 dated comps, grade the newest
-  23) scored the plain curve ×2.56 against the adjusted twin ×2.85 — so the
-  adjustments do not ship. Category factors lost in every form tried.
+  multiple scored a median miss of ×4.91; the least-squares curve ×3.27;
+  the median curve ×3.82; a hybrid of per-category curves ×3.35.
+- Every keep-or-drop call was made **out-of-time**: a rolling-origin
+  hindcast (fit the oldest 47 dated comps, grade the newest 23). It struck
+  radar-2's growth/maturity adjustments in the previous round (×2.56 against
+  ×2.85). This round it chose the estimator: the median fit lost
+  leave-one-out and won the hindcast outright — ×2.07 against the
+  least-squares ×2.56, 43.5% against 39.1% priced within 2× — so the median
+  fit ships. The hybrid never stood apart out-of-time (its training era
+  holds no category with 12+ comps, so there it *is* the global curve) and
+  graded worse in-window, so it does not ship. Category factors lost in
+  every form tried.
 - Every row carries a **split-conformal band** (central 50%) built from the
   shipped model's held-out residuals, conditioned on TVL tercile. Achieved
-  coverage: 51.1% at 50% nominal, 81.5% at 80%, 92.4% at 90%.
+  coverage: 51.1% at 50% nominal (47 of 92 launched peers inside), 81.5% at
+  80%, 92.4% at 90%.
 - The board ranks **all 198** strictly pre-token protocols that pass the
   hygiene; the 144 it turns away are published in an exclusion audit with
   reasons (the largest is an exchange's own product line at $13.8B TVL).
@@ -37,8 +48,8 @@ measured result, not a preference:
   positive at the band's bear end), **CLOSE** (only at base), **SHORT** (at
   neither) — for a $1,000 reference position under a labelled 10%
   community-allocation scenario, with the farmer's hurdle in basis points
-  beside it. On this snapshot: PAYS 0, CLOSE 116, SHORT 82. The nearest row
-  misses PAYS by $2.43; the hurdle column shows the distance honestly.
+  beside it. On this snapshot: PAYS 0, CLOSE 119, SHORT 79. The nearest row
+  misses PAYS by $2.37; the hurdle column shows the distance honestly.
 
 Full methodology, the candidate table, and the failure modes:
 [`docs/method.md`](docs/method.md).
@@ -55,11 +66,14 @@ Running the program writes, into the output directory:
 
 The static dashboard in `dashboard/` renders a front page (top 10,
 calibration scatter, the backtest that chose the model), the full board with
-filters and verdict sorts, a per-protocol detail view (waterfall, factor
-tiles, sensitivity, a live stress slider — and a page recompute that agrees
-with `board.json` to the dollar), a category wall of small multiples on
-identical axes, the exclusion audit and model card, and the live-token
-evidence base. It makes no network requests.
+filters and verdict sorts (filters are linkable — `?verdict=CLOSE#/board`
+is a view, not a session), a per-protocol detail view that fits the whole
+dossier on one screen (waterfall, factor tiles, sensitivity tornado, the
+conformal band in natural frequencies, the farmer's hurdle, the six-step
+farm plan — and a page recompute that agrees with `board.json` to the
+dollar), a category wall of small multiples on identical axes, the
+exclusion audit and model card, and the live-token evidence base. It makes
+no network requests.
 
 ## Run it
 
@@ -76,11 +90,12 @@ byte-identical `board.json`, `data.js` and `dossier.json`.
 ## Layout
 
 - `main.ts` — entry point.
-- `lib/model.ts` — the radar-3 model: comp hygiene, the candidate backtest,
+- `lib/model.ts` — the radar-4 model: comp hygiene, the candidate backtest,
   the hindcast, conformal bands, verdicts, farm plans, the exclusion audit.
 - `vendor/makefun-board.ts` — the kit's dossier writer, unmodified.
 - `dashboard/` — the static dashboard (`index.html`, `app.css`, `app.js`).
-- `screenshots/` — the front page, a protocol detail view, the category wall.
+- `screenshots/` — the front page, a protocol detail view, the board
+  filtered to CLOSE verdicts.
 - `docs/method.md` — the full method, with the real backtest numbers.
 
 ## License

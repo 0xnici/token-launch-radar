@@ -1,8 +1,9 @@
-// The token radar's model, version radar-3: one snapshot of the protocol universe in, one ranked
-// board out. radar-3 keeps radar-2's discipline — every number a pure function of the sealed
-// snapshot, no protocol name ever special-cased — and changes how the number is earned: the model
-// is chosen by a leave-one-out backtest against the snapshot's own launched protocols, and every
-// row carries the range that backtest says the model deserves.
+// The token radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
+// board out. radar-4 keeps the discipline of the rounds before it — every number a pure function
+// of the sealed snapshot, no protocol name ever special-cased — and changes how the number is
+// earned: the model is chosen by a leave-one-out backtest against the snapshot's own launched
+// protocols, every keep-or-drop is decided on an out-of-time hindcast, and every row carries the
+// range the backtest says the model deserves.
 //
 // The board ranks every strictly pre-token protocol that passes the board's hygiene (the
 // watchlist's own exclusions: no wrapped, staked or bridged product of a token that already
@@ -11,27 +12,37 @@
 // are published in the exclusion audit with the reason and their TVL.
 //
 // Pricing. The evidence base is the snapshot's clean comps: tokenized protocols that pass the
-// same hygiene (92 on this snapshot). Six candidate pricers were fitted on the comps and graded
+// same hygiene (92 on this snapshot). Eight candidate pricers were fitted on the comps and graded
 // by leave-one-out: price each comp as if it were pre-token, from the other 91, and measure the
 // error against its recorded market cap. The candidates (leave-one-out median error factors):
 //
 //   A  radar-2 itself (category median multiple x growth x maturity)      x4.91
-//   B  a fitted size curve alone, log10(mcap) = a + b log10(TVL)          x3.27
+//   B  a fitted size curve alone, log10(mcap) = a + b log10(TVL), OLS     x3.27
 //   C  B + a category factor (shrunk toward 1, damped at gamma = 0.5)     x3.72
 //   D  C + radar-2's growth term                                          x3.57
 //   E  B x growth x maturity (radar-2's adjustments on the fitted curve)  x3.05
 //   F  E with the curve fitted to adjustment-deflated market caps         x3.54
+//   G  the size curve fitted by median (least-absolute-deviations)        x3.82
+//        regression instead of OLS
+//   H  hybrid: per-category OLS curves where a category holds >= 12       x3.35
+//        comps (shrunk toward the global curve by n), global elsewhere
 //
 // Two splits decide two different things, so the band's calibration is never graded on the
 // split that chose the model. Leave-one-out narrows the field: the category factor loses in
 // every form (once size is fitted, category medians mostly re-state size, and their noise
 // costs more than their signal pays), and the curve family beats radar-2's multiple outright.
-// The keep-or-drop decision on the adjustment terms is then made out-of-time, on a rolling-
-// origin hindcast (fit on the oldest dated comps, grade on the newest): there the plain curve
-// beats its adjusted twin (median error x2.55 against x2.85, 39% against 26% priced within
-// 2x), so the adjustments do not ship. What ships is the reference class itself, unadjusted:
+// Every keep-or-drop decision is then made out-of-time, on a rolling-origin hindcast (fit on
+// the oldest dated comps, grade on the newest). In radar-3 that split struck the adjustment
+// terms: the plain curve beat its adjusted twin (median error x2.56 against x2.85, 39% against
+// 26% priced within 2x), so the adjustments did not ship. In radar-4 the same split chose the
+// estimator: the median fit lost leave-one-out (x3.82 against the OLS x3.27) and won the
+// hindcast outright (x2.07 against x2.56, 43% against 39% within 2x), so the median fit ships —
+// the rule that removed E is the rule that removed B, applied the same way. The hybrid never
+// stood apart out-of-time: its training era holds no category with 12+ comps, so there it is
+// the global curve itself, and in-window it graded worse than B. What ships is the reference
+// class itself, unadjusted, fitted at its median:
 //
-//   implied = max(1, round(10 ^ (a + b x log10(tvl))))     a, b fitted by OLS on the clean comps
+//   implied = max(1, round(10 ^ (a + b x log10(tvl))))     a, b fitted by LAD on the clean comps
 //
 // This is reference-class forecasting applied literally: price the class, publish how the
 // class actually performed, and let no per-row judgement in through the side door. Category,
@@ -133,7 +144,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -322,6 +333,8 @@ export interface Backtest {
   decile_realized_multiples: number[];
   /** Rolling-origin hindcast: fit on the oldest comps, graded on the newest. */
   hindcast: { train_n: number; test_n: number; test_median_error_factor: number; drift: number };
+  /** Every hindcast contender's own out-of-time grade, published so the decision split is auditable. */
+  hindcast_grades: { id: string; median_error_factor: number; within_2x_pct: number }[];
   thin_evidence_pct: number;
 }
 
@@ -544,6 +557,66 @@ export function curveValue(fit: CurveFit, tvl: number): number {
   return Math.pow(10, fit.intercept + fit.slope * Math.log10(tvl));
 }
 
+/**
+ * The median (least-absolute-deviations) size curve through a comp pool: the line minimising
+ * the total absolute log error, instead of the least-squares line. An optimal two-parameter
+ * LAD line passes through at least two of the points, so the exact optimum is found by pricing
+ * every pair's line over the pool and keeping the cheapest total. Deterministic: pairs are
+ * enumerated in pool order and a line must be strictly cheaper to displace the incumbent, so
+ * ties keep the earliest pair. Rounded to 4 decimals at the source, like the OLS fit.
+ */
+export function fitCurveLAD(pool: SnapshotProtocol[]): CurveFit {
+  if (pool.length < 2) return fitCurve(pool);
+  const xs = pool.map((p) => Math.log10(p.tvl_usd));
+  const ys = pool.map((p) => Math.log10(p.mcap_usd!));
+  let best: { a: number; b: number; cost: number } | null = null;
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      if (xs[i] === xs[j]) continue;
+      const b = (ys[j]! - ys[i]!) / (xs[j]! - xs[i]!);
+      const a = ys[i]! - b * xs[i]!;
+      let cost = 0;
+      for (let k = 0; k < pool.length; k++) {
+        cost += Math.abs(ys[k]! - (a + b * xs[k]!));
+        if (best !== null && cost >= best.cost) break;
+      }
+      if (best === null || cost < best.cost) best = { a, b, cost };
+    }
+  }
+  if (best === null) return fitCurve(pool);
+  return { intercept: round4(best.a), slope: round4(best.b) };
+}
+
+/** How many comps a category needs before the hybrid gives it a curve of its own. */
+export const HYBRID_MIN_COMPS = 12;
+
+/**
+ * The hybrid fit: the global OLS curve, plus one curve per deep category (at least
+ * HYBRID_MIN_COMPS comps), each shrunk toward the global curve with the model's shrink_k —
+ * the same empirical-Bayes pull the category factors use. Every fit is rounded at the source.
+ */
+export function fitHybrid(pool: SnapshotProtocol[], model: ModelConstants): { global: CurveFit; curves: Map<string, CurveFit> } {
+  const global = fitCurve(pool);
+  const byCategory = new Map<string, SnapshotProtocol[]>();
+  for (const p of pool) {
+    const key = p.category ?? '';
+    const list = byCategory.get(key);
+    if (list === undefined) byCategory.set(key, [p]);
+    else list.push(p);
+  }
+  const curves = new Map<string, CurveFit>();
+  for (const [category, members] of byCategory) {
+    const n = members.length;
+    if (n < HYBRID_MIN_COMPS) continue;
+    const cf = fitCurve(members);
+    curves.set(category, {
+      intercept: round4((n * cf.intercept + model.shrink_k * global.intercept) / (n + model.shrink_k)),
+      slope: round4((n * cf.slope + model.shrink_k * global.slope) / (n + model.shrink_k)),
+    });
+  }
+  return { global, curves };
+}
+
 /** radar-2's growth multiplier for one protocol, unchanged in shape. */
 export function growthMultiplier(p: SnapshotProtocol, model: ModelConstants): { pct: number; mult: number } {
   const raw = finite(p.change_7d, 0);
@@ -617,14 +690,33 @@ const priceF: Pricer = (target, pool, asOf, model) => {
   return curveValue(fitCurve(pool, deflate), target.tvl_usd) * deflate(target);
 };
 
+/** Candidate G: the size curve fitted by median (least-absolute-deviations) regression. */
+const priceG: Pricer = (target, pool) => curveValue(fitCurveLAD(pool), target.tvl_usd);
+
+/** Candidate H: the hybrid — a shrunk category curve where a category is deep, the global curve elsewhere. */
+const priceH: Pricer = (target, pool, _asOf, model) => {
+  const { global, curves } = fitHybrid(pool, model);
+  return curveValue(curves.get(target.category ?? '') ?? global, target.tvl_usd);
+};
+
 const CANDIDATES: { id: string; label: string; pricer: Pricer }[] = [
   { id: 'A', label: 'radar-2: category median multiple x growth x maturity', pricer: priceA },
-  { id: 'B', label: 'fitted size curve alone', pricer: priceB },
+  { id: 'B', label: 'fitted size curve alone (least squares)', pricer: priceB },
   { id: 'C', label: 'size curve + shrunk, damped category factor', pricer: priceC },
   { id: 'D', label: 'size curve + category factor + growth', pricer: priceD },
   { id: 'E', label: 'size curve x growth x maturity', pricer: priceE },
   { id: 'F', label: 'size curve fitted to adjustment-deflated caps, x growth x maturity', pricer: priceF },
+  { id: 'G', label: 'median (LAD) size curve', pricer: priceG },
+  { id: 'H', label: 'hybrid: global curve + shrunk category curves (12+ comps)', pricer: priceH },
 ];
+
+/** The candidate pricers by id, for every place that must price with the shipped model. */
+const PRICER_BY_ID = new Map(CANDIDATES.map((c) => [c.id, c.pricer]));
+
+/** The shipped model's fit of a comp pool: the LAD fit when the median curve ships, OLS otherwise. */
+export function fitShipped(pool: SnapshotProtocol[], winner: string): CurveFit {
+  return winner === 'G' ? fitCurveLAD(pool) : fitCurve(pool);
+}
 
 /** Leave-one-out residuals of one pricer over the comps: log10(actual / predicted) per comp. */
 function looErrors(pricer: Pricer, comps: SnapshotProtocol[], asOf: string, model: ModelConstants): number[] {
@@ -716,17 +808,29 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
   const cut = Math.ceil((dated.length * 2) / 3);
   const train = dated.slice(0, cut);
   const test = dated.slice(cut);
-  const hindcastGrade = (pricer: Pricer): number => {
+  const hindcastGrade = (pricer: Pricer): { med: number; within_2x_pct: number } => {
     const errs = test.map((t) => Math.abs(Math.log10(t.mcap_usd! / pricer(t, train, snapshot.as_of, model))));
-    return median(errs);
+    return {
+      med: median(errs),
+      within_2x_pct: Math.round((errs.filter((e) => e <= Math.log10(2)).length / errs.length) * 1000) / 10,
+    };
   };
-  const pricerById = new Map(CANDIDATES.map((c) => [c.id, c.pricer]));
-  const hindB = hindcastGrade(pricerById.get('B')!);
-  const hindE = hindcastGrade(pricerById.get('E')!);
-  const shippedId = hindE < hindB ? 'E' : 'B';
+  // The decision split grades the plain curve (B), its adjusted twin (E), the median fit (G)
+  // and the hybrid (H). The plain curve is the incumbent: a challenger ships only on a strict
+  // out-of-time win, and ties stay with the simpler model. (On this snapshot the hybrid's train
+  // era holds no category with 12+ comps, so out-of-time it is the global curve itself.)
+  const hindcastGrades = ['B', 'E', 'G', 'H'].map((id) => {
+    const g = hindcastGrade(PRICER_BY_ID.get(id)!);
+    return { id, median_error_factor: round4(Math.pow(10, g.med)), within_2x_pct: g.within_2x_pct, med: g.med };
+  });
+  let shippedId = 'B';
+  for (const g of hindcastGrades) {
+    if (g.id !== 'B' && g.med < hindcastGrades.find((h) => h.id === shippedId)!.med) shippedId = g.id;
+  }
+  const hindShipped = hindcastGrades.find((h) => h.id === shippedId)!;
   const shippedErrors = graded.find((g) => g.id === shippedId)!.errors;
   const shippedMedFactor = Math.pow(10, median(shippedErrors.map((e) => Math.abs(e))));
-  const hindTestFactor = Math.pow(10, shippedId === 'E' ? hindE : hindB);
+  const hindTestFactor = hindShipped.median_error_factor;
 
   // Conformal bands from the shipped model's residuals: global, and per comp-TVL tercile.
   const ratios = shippedErrors.map((e) => Math.pow(10, e)).sort((a, b) => a - b);
@@ -751,7 +855,7 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
 
   // Rank validation: the held-out ranking against the actual ranking, and what each predicted
   // decile actually realised (median realized multiple, robust to the tail).
-  const shippedPricer = pricerById.get(shippedId)!;
+  const shippedPricer = PRICER_BY_ID.get(shippedId)!;
   const looPreds = comps.map((t, i) => shippedPricer(t, comps.filter((_, j) => j !== i), snapshot.as_of, model));
   const rankIc = spearman(looPreds, comps.map((p) => p.mcap_usd!));
   const byPred = comps.map((_, i) => i).sort((a, b) => looPreds[a]! - looPreds[b]!);
@@ -761,27 +865,50 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
     deciles.push(round4(median(group.map((i) => comps[i]!.mcap_usd! / comps[i]!.tvl_usd))));
   }
 
-  // The fitted exponent's precision: OLS standard error, 95% interval, R-squared.
-  const fit = fitCurve(comps);
+  // The shipped fit's precision. A least-squares fit takes the analytic standard error and
+  // R-squared; the median fit takes a jackknife standard error for its slope and the L1
+  // pseudo-R-squared (absolute deviation explained against the median cap) — each estimator
+  // graded in its own loss, and method.md says which is which.
+  const fit = fitShipped(comps, shippedId);
   const xs = comps.map((p) => Math.log10(p.tvl_usd));
   const ys = comps.map((p) => Math.log10(p.mcap_usd!));
   const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
   const my = ys.reduce((s, v) => s + v, 0) / ys.length;
-  let ssRes = 0;
-  let ssTot = 0;
-  let sxx = 0;
-  xs.forEach((x, i) => {
-    const yhat = fit.intercept + fit.slope * x;
-    ssRes += (ys[i]! - yhat) * (ys[i]! - yhat);
-    ssTot += (ys[i]! - my) * (ys[i]! - my);
-    sxx += (x - mx) * (x - mx);
-  });
-  const se = xs.length > 2 && sxx > 0 ? Math.sqrt(ssRes / (xs.length - 2) / sxx) : 0;
+  let slopeCi95: [number, number];
+  let r2: number;
+  if (shippedId === 'G') {
+    const thetas = comps.map((_, j) => fitCurveLAD(comps.filter((_, k) => k !== j)).slope);
+    const tMean = thetas.reduce((s, v) => s + v, 0) / thetas.length;
+    const varJack = thetas.length > 1 ? ((thetas.length - 1) / thetas.length) * thetas.reduce((s, t) => s + (t - tMean) * (t - tMean), 0) : 0;
+    const se = Math.sqrt(varJack);
+    slopeCi95 = [round4(fit.slope - 1.96 * se), round4(fit.slope + 1.96 * se)];
+    const medY = median(ys);
+    let l1Fit = 0;
+    let l1Null = 0;
+    xs.forEach((x, i) => {
+      l1Fit += Math.abs(ys[i]! - (fit.intercept + fit.slope * x));
+      l1Null += Math.abs(ys[i]! - medY);
+    });
+    r2 = round4(l1Null > 0 ? 1 - l1Fit / l1Null : 0);
+  } else {
+    let ssRes = 0;
+    let ssTot = 0;
+    let sxx = 0;
+    xs.forEach((x, i) => {
+      const yhat = fit.intercept + fit.slope * x;
+      ssRes += (ys[i]! - yhat) * (ys[i]! - yhat);
+      ssTot += (ys[i]! - my) * (ys[i]! - my);
+      sxx += (x - mx) * (x - mx);
+    });
+    const se = xs.length > 2 && sxx > 0 ? Math.sqrt(ssRes / (xs.length - 2) / sxx) : 0;
+    slopeCi95 = [round4(fit.slope - 1.96 * se), round4(fit.slope + 1.96 * se)];
+    r2 = round4(ssTot > 0 ? 1 - ssRes / ssTot : 0);
+  }
 
   return {
     comps: comps.length,
     selection_rule:
-      'leave-one-out grades every candidate; a rolling-origin hindcast (oldest two-thirds fit, newest third graded) decides whether the adjustment terms ship, so the split that chooses is not the split that calibrates the bands',
+      'leave-one-out grades every candidate; a rolling-origin hindcast (oldest two-thirds fit, newest third graded) decides what ships — adjustment terms, estimator, hybrid — so the split that chooses is not the split that calibrates the bands',
     candidates: graded.map((g) => ({
       id: g.id,
       label: g.label,
@@ -794,8 +921,8 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
     winner: shippedId,
     curve_intercept: round4(fit.intercept),
     curve_slope: round4(fit.slope),
-    curve_slope_ci95: [round4(fit.slope - 1.96 * se), round4(fit.slope + 1.96 * se)],
-    curve_r2: round4(ssTot > 0 ? 1 - ssRes / ssTot : 0),
+    curve_slope_ci95: slopeCi95,
+    curve_r2: r2,
     band_low_factor: round4(globalBand.lo),
     band_high_factor: round4(globalBand.hi),
     band_buckets: { edges: [Math.round(edge1), Math.round(edge2)], factors: bucketFactors, counts: bucketRatios.map((r) => r.length) },
@@ -817,6 +944,7 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
       test_median_error_factor: round4(hindTestFactor),
       drift: round4(shippedMedFactor > 0 ? hindTestFactor / shippedMedFactor : 0),
     },
+    hindcast_grades: hindcastGrades.map((g) => ({ id: g.id, median_error_factor: g.median_error_factor, within_2x_pct: g.within_2x_pct })),
     thin_evidence_pct: 0,
   };
 }
@@ -888,8 +1016,8 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 /** The protocols the board ranks, strongest first, with ranks 1..n, bands, verdicts and flags. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const comps = cleanComps(snapshot);
-  const fit = fitCurve(comps);
   const backtest = runBacktest(snapshot, model);
+  const fit = fitShipped(comps, backtest.winner);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, ranked like everything else.
@@ -910,7 +1038,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
 
   // Jackknife fragility: refit the curve leaving one comp out at a time and reprice the row;
   // the interquartile spread of those values over the base value is the row's fragility.
-  const jackFits = comps.map((_, j) => fitCurve(comps.filter((_, k) => k !== j)));
+  const jackFits = comps.map((_, j) => fitShipped(comps.filter((_, k) => k !== j), backtest.winner));
   const fragilityOf = (s: (typeof scored)[number]): number => {
     const values = jackFits.map((f) => {
       const v = curveValue(f, s.p.tvl_usd) * (backtest.winner === 'E' ? s.growthMult * s.maturityMult : 1);
@@ -1049,7 +1177,7 @@ export function categoryHeat(snapshot: Snapshot, board: BoardRow[], backtest: Ba
   }
   const globalMedian = all.length > 0 ? median(all) : 0;
   // The shipped model's held-out spread per category, for the evidence grade.
-  const shipped = backtest.winner === 'E' ? priceE : priceB;
+  const shipped = PRICER_BY_ID.get(backtest.winner)!;
   const errors = looErrors(shipped, comps, snapshot.as_of, model);
   const globalMedErr = median(errors.map((e) => Math.abs(e)));
   const errByCategory = new Map<string, number[]>();
@@ -1338,7 +1466,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd!,
       loo_pred_usd: Math.round(
-        (backtest.winner === 'E' ? priceE : priceB)(p, comps.filter((_, j) => j !== i), snapshot.as_of, model),
+        PRICER_BY_ID.get(backtest.winner)!(p, comps.filter((_, j) => j !== i), snapshot.as_of, model),
       ),
     })),
     headline: {
