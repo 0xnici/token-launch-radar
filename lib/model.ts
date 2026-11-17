@@ -153,7 +153,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-7';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -359,6 +359,27 @@ export interface Backtest {
    *  candidate's own residual spread. Higher is better; a strictly proper scoring rule. */
   log_scores: { id: string; mean_log_score: number; sigma: number }[];
   thin_evidence_pct: number;
+  /** Round 6: the growth & age audit — the two signals the value-model criterion names and the
+   *  shipped curve omits, measured three ways (era fits in fitted_coefficients, a factor check,
+   *  and a hard-capped tilt graded as a candidate) and published whichever way they land. */
+  growth_age: GrowthAgeAudit;
+}
+
+/** The growth & age audit's numbers: a factor check on the winner's held-out residuals, and
+ *  candidate T — the winner times a tilt from the fitted growth/maturity terms, hard-capped
+ *  at [cap_lo, cap_hi] with the caps fixed before any fit — graded on the gate's two origins. */
+export interface GrowthAgeAudit {
+  factor_check: { n: number; growth_corr: number; age_corr: number; noise_band: number };
+  tilt_gate: {
+    cap_lo: number;
+    cap_hi: number;
+    origins: { kg: number; ka: number; g: number; t: number }[];
+    mean_g: number;
+    mean_t: number;
+    improvement_pct: number;
+    sign_stable: boolean;
+    verdict: string;
+  };
 }
 
 /** One strictly pre-token protocol the hygiene turned away, with the reason and its TVL. */
@@ -1105,6 +1126,77 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
       );
   }
   const gateVerdicts = ['I', 'J', 'M', 'N', 'O', 'C', 'C2'].map((id) => ({ id, verdict: verdictById.get(id)! }));
+
+  // Round 6 — the growth & age audit. The value-model criterion names three signals (TVL, its
+  // seven-day growth, time with no token); the shipped curve prices with the first alone, so the
+  // other two are measured three ways and published whichever way they land. (1) The era fits
+  // above (fitted_coefficients) show the fitted terms' signs across eras. (2) A factor check:
+  // the shipped model's leave-one-out residuals against each covariate, against the noise band
+  // ±1.96/√n. (3) Candidate T: the shipped curve times a tilt from those same fitted terms,
+  // hard-capped at [0.75, 1.33] — the caps fixed before any fit, so no row may be moved more
+  // than that by the two signals together — graded on the same two origins under the same gate
+  // rules as every challenger (≥5% mean win, no origin >10% worse, sign-stable coefficients).
+  const pearson = (xs: number[], ys: number[]): number => {
+    const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
+    const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+    let num = 0;
+    let dx = 0;
+    let dy = 0;
+    xs.forEach((x, i) => {
+      num += (x - mx) * (ys[i]! - my);
+      dx += (x - mx) * (x - mx);
+      dy += (ys[i]! - my) * (ys[i]! - my);
+    });
+    return dx > 0 && dy > 0 ? num / Math.sqrt(dx * dy) : 0;
+  };
+  const gErrors = graded.find((g) => g.id === 'G')!.errors;
+  const factorCheck = {
+    n: comps.length,
+    growth_corr: round4(pearson(gErrors, comps.map((p) => growthCovariate(p, model)))),
+    age_corr: round4(pearson(gErrors, comps.map((p) => ageFraction(p, snapshot.as_of, model)))),
+    noise_band: round4(1.96 / Math.sqrt(comps.length)),
+  };
+  const T_CAP_LO = 0.75;
+  const T_CAP_HI = 1.33;
+  const tiltGrades = origins.map((o) => {
+    const fit = fitCurveLAD(o.train);
+    const kg = fitGrowthBeta(o.train, fit, model);
+    const ka = fitMaturityGamma(o.train, fit, kg, snapshot.as_of, model);
+    const tilt = (p: SnapshotProtocol): number =>
+      Math.min(
+        T_CAP_HI,
+        Math.max(
+          T_CAP_LO,
+          Math.max(ADJ_FLOOR, 1 + kg * growthCovariate(p, model)) *
+            Math.max(ADJ_FLOOR, 1 + ka * ageFraction(p, snapshot.as_of, model)),
+        ),
+      );
+    const medOf = (price: (t: SnapshotProtocol) => number): number =>
+      Math.pow(10, median(o.test.map((t) => Math.abs(Math.log10(t.mcap_usd! / price(t))))));
+    return { kg, ka, g: medOf((t) => curveValue(fit, t.tvl_usd)), t: medOf((t) => curveValue(fit, t.tvl_usd) * tilt(t)) };
+  });
+  const tMeanG = (tiltGrades[0]!.g + tiltGrades[1]!.g) / 2;
+  const tMeanT = (tiltGrades[0]!.t + tiltGrades[1]!.t) / 2;
+  const tSignStable =
+    Math.sign(tiltGrades[0]!.kg) === Math.sign(tiltGrades[1]!.kg) && Math.sign(tiltGrades[0]!.ka) === Math.sign(tiltGrades[1]!.ka);
+  const tNoBlowup = tiltGrades.every((o) => o.t <= o.g * 1.1);
+  const tShips = tMeanT <= tMeanG * 0.95 && tNoBlowup && tSignStable;
+  const growthAge: GrowthAgeAudit = {
+    factor_check: factorCheck,
+    tilt_gate: {
+      cap_lo: T_CAP_LO,
+      cap_hi: T_CAP_HI,
+      origins: tiltGrades.map((o) => ({ kg: round4(o.kg), ka: round4(o.ka), g: round4(o.g), t: round4(o.t) })),
+      mean_g: round4(tMeanG),
+      mean_t: round4(tMeanT),
+      improvement_pct: round2((1 - tMeanT / tMeanG) * 100),
+      sign_stable: tSignStable,
+      verdict: tShips
+        ? 'ships: the capped tilt clears the two-origin gate'
+        : `rejected: mean ×${round4(tMeanT)} against the curve's ×${round4(tMeanG)} (the gate needs ≥5% better)${tSignStable ? '' : '; the age coefficient flips sign across eras'} — the caps bounded the damage (worst origin ${round2(Math.max(...tiltGrades.map((o) => (o.t / o.g - 1) * 100)))}% worse) but could not manufacture signal`,
+    },
+  };
+
   const hindShipped = originGrades[1]!.grades.find((g) => g.id === shippedId)!;
   const shippedErrors = graded.find((g) => g.id === shippedId)!.errors;
   const shippedMedFactor = Math.pow(10, median(shippedErrors.map((e) => Math.abs(e))));
@@ -1272,6 +1364,7 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
     gate_verdicts: gateVerdicts,
     log_scores: logScores,
     thin_evidence_pct: 0,
+    growth_age: growthAge,
   };
 }
 

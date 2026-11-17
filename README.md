@@ -10,11 +10,15 @@
 92 launched peers — and published with its own measured error: median blind
 miss ×3.82, ranking validated at Spearman IC 0.32. The curve itself is the
 survivor of a pre-registered two-origin hindcast gate: six challengers were
-fitted against it this round and none cleared the bar (the gate, below).
+fitted against it and none cleared the bar (the gate, below). Rounds 6–7 were
+presentation rounds — no number changed: the dossier now opens with the method
+card, the board leads with the record as stat cards, each detail view puts its
+six-step farm plan on the first screen, and the audit page prints every
+held-out comp's actual market cap beside the curve's blind price of it.
 Entry for the make.fun
 bounty ["Build the best token launch radar"](https://make.fun/bounty/token-radar-01) (token-radar-01).
 
-## The model (radar-5)
+## The model (radar-7)
 
 ```
 implied = round( 10 ^ (4.5869 + 0.3135 x log10(TVL)) )
@@ -105,10 +109,10 @@ byte-identical `board.json`, `data.js` and `dossier.json`.
 ## Layout
 
 - `main.ts` — entry point.
-- `lib/model.ts` — the radar-5 model: comp hygiene, the candidate backtest,
+- `lib/model.ts` — the radar-7 model: comp hygiene, the candidate backtest,
   the two-origin hindcast gate, conformal bands, verdicts, farm plans, the exclusion audit.
 - `vendor/makefun-board.ts` — the kit's dossier writer, unmodified.
-- `dashboard/` — the static dashboard (`index.html`, `app.css`, `app.js`).
+- `dashboard/` — the static dashboard (`index.html`, `00-method.md`, `model.js`, `style.css`).
 - `screenshots/` — the board, a protocol detail view, the board
   filtered to CLOSE verdicts.
 - `docs/method.md` — the full method, with the real backtest numbers.

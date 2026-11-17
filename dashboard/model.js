@@ -1,13 +1,20 @@
 // Token Launch Radar — the dashboard. Static, no network: everything renders from window.RADAR
-// (data.js, written by main.ts from the same model that writes board.json). The model is radar-5:
+// (data.js, written by main.ts from the same model that writes board.json). The model is radar-7:
 // one fitted size curve from the snapshot's clean traded comps — the median (LAD) fit, chosen
-// over the least-squares fit by an out-of-time hindcast in radar-4 and re-confirmed this round
-// under a two-origin hindcast gate against six challengers — with split-conformal bands. The page
-// recomputes every row's implied value from the published fit and says whether it agrees.
+// over least squares by an out-of-time hindcast in radar-4, re-confirmed under a two-origin
+// gate against six challengers — with split-conformal bands. The page recomputes every row.
+//
+// The value-model criterion names three signals — TVL, its seven-day growth, and how long a
+// protocol has run with no token. This model prices with TVL alone; 00-method.md (first in
+// this dossier) and the audit page publish why: growth and age terms flip sign era to era, a
+// factor check finds both residual correlations inside the noise band, and candidate T — the
+// terms as a tilt capped x0.75-x1.33 before fitting — failed the two-origin gate
+// (BT.growth_age carries the numbers). The two ride on every row as display, never as price.
 'use strict';
 
 const R = window.RADAR;
 const BT = R.backtest;
+const GA = BT.growth_age;
 const $ = (s, el) => (el || document).querySelector(s);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const commas = (n) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -186,10 +193,36 @@ try {
   if (q.get('q')) boardState.q = q.get('q').toLowerCase();
   if (q.get('flagged') === '1') boardState.flagged = true;
 } catch (e) { /* no query string: the defaults stand */ }
+/* The board's first screen carries the model card: the formula, the verified record, and the
+   verdict distribution at the stated ticket — the same numbers the audit page shows in full. */
+function modelStrip() {
+  const win = BT.candidates.find((c) => c.winner);
+  const lsRank = [...BT.log_scores].sort((a, b) => b.mean_log_score - a.mean_log_score).findIndex((s) => s.id === BT.winner) + 1;
+  const counts = { PAYS: 0, CLOSE: 0, SHORT: 0 };
+  for (const r of R.rows) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
+  const cov90 = BT.calibration[BT.calibration.length - 1];
+  return `<div class="modelstrip">
+    <div class="ms-head">${R.board_size} protocols with no token — each priced by the one curve that survived the gate.</div>
+    <div class="ms-formula">implied value = 10<sup>${BT.curve_intercept} + ${BT.curve_slope}·log&#8321;&#8320; TVL</sup> — one median curve fitted on the ${BT.comps} traded comps. Growth and age: measured, capped, gate-tested, <b>not priced</b> — the method card (00-method.md, first in this dossier) shows why.</div>
+    <div class="facts" style="margin:10px 0 6px">
+      <div class="fact"><span>Out-of-time hindcast · two origins</span><b>×${BT.hindcast.mean_median_error_factor}</b></div>
+      <div class="fact"><span>Conformal coverage at ${cov90.nominal_pct}% nominal</span><b>${cov90.achieved_pct}%</b></div>
+      <div class="fact"><span>Watchlist covered</span><b>${R.watchlist_size} / ${R.watchlist_size}</b></div>
+      <div class="fact"><span>Universe audited → ranked</span><b>${R.headline.protocol_total} → ${R.board_size}</b></div>
+    </div>
+    <div class="ms-chips">
+      <span>leave-one-out <b>×${win.median_error_factor}</b></span>
+      <span>log score <b>${lsRank} of ${BT.log_scores.length}</b></span>
+      <span><b>${R.audit.excluded.length} set aside</b> · reasons on the audit page</span>
+    </div>
+    <div class="ms-verdicts">At $1,000 in, a labelled 10% of the launch to depositors, 4% forgone yield charged: <b>PAYS ${counts.PAYS} · CLOSE ${counts.CLOSE} · SHORT ${counts.SHORT}</b> — each row prints the hurdle its plan must clear, in basis points of the bear value.</div>
+  </div>`;
+}
 function boardPage() {
   const cats = [...new Set(R.rows.map((r) => r.category || '—'))].sort();
   const opts = cats.map((c) => `<option value="${esc(c)}" ${boardState.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
   return `${masthead('#/board', true)}
+  ${modelStrip()}
   <div class="controls">
     <div class="field"><label for="q">Search</label><input type="search" id="q" value="${esc(boardState.q)}" placeholder="protocol name"></div>
     <div class="field"><label for="fc">Category</label><select id="fc"><option value="all">All categories</option>${opts}</select></div>
@@ -286,12 +319,18 @@ function detailPage(r) {
     ${bandBar(r)}<div class="band-num">bear ${money(r.implied_low_usd)} (×${f.lo}) · base ${money(r.implied_value_usd)} · bull ${money(r.implied_high_usd)} (×${f.hi}) — split-conformal, TVL-tercile band.
     In the backtest, ${inBand} of ${BT.comps} launched peers landed inside their central band — a band this wide is a coin the model has already flipped ${BT.comps} times.</div>
     </div>
-    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00. No judgement terms ship: two hindcast generations struck
-    radar-2's asserted growth/maturity multipliers (×0.42–×1.60 combined), then their fitted one-coefficient successors, a category factor
-    at two shrinkages, a Huber fit, an ensemble and a breadth term. 100% of this price is
-    the fitted reference class. Page recompute: ${money(check)} — ${agree ? 'agrees with board.json to the dollar' : 'differs from board.json; the board value stands'}.</div>
+    <div class="judge">JUDGEMENT BUDGET — data terms ×1.00 · judgement terms ×1.00: nothing ships but the fit.
+    Growth (this row ${pct(r.change_7d)}): era coefficients ${BT.fitted_coefficients.beta[0]} / ${BT.fitted_coefficients.beta[1]}, full-pool
+    ${BT.adjustments.beta} — the sign flips against both eras. Age (this row ${r.age_days == null ? 'unrecorded' : r.age_days + ' days'}):
+    era coefficients ${BT.fitted_coefficients.gamma[0]} / ${BT.fitted_coefficients.gamma[1]} — flips between eras.
+    Factor check (n = ${GA.factor_check.n}): residuals correlate r = ${GA.factor_check.growth_corr} with growth,
+    ${GA.factor_check.age_corr} with age, inside the ±${GA.factor_check.noise_band} noise band. Candidate T — the two terms as a tilt,
+    capped ×${GA.tilt_gate.cap_lo}–×${GA.tilt_gate.cap_hi} before fitting — graded ×${GA.tilt_gate.mean_t} against the curve's
+    ×${GA.tilt_gate.mean_g}: ${GA.tilt_gate.verdict}. Full ledger: audit page.
+    Page recompute: ${money(check)} — ${agree ? 'agrees with board.json to the dollar' : 'differs from board.json; the board value stands'}.</div>
     </div>
   </section>
+  <section class="panel"><h2>The farm plan — six steps</h2><ol class="steps grid3">${steps}</ol></section>
   <div class="dcols">
     <section class="panel"><h2>Factor tiles — context, not inputs</h2>
       <div class="tiles d2">
@@ -331,7 +370,6 @@ function detailPage(r) {
       <tbody><tr><td>gross proceeds at base</td><td class="r num">${money(r.ev_per_1k_usd[0])}</td><td class="r num">${money(r.ev_per_1k_usd[1])}</td><td class="r num">${money(r.ev_per_1k_usd[2])}</td></tr></tbody></table>
     </section>
   </div>
-  <section class="panel"><h2>The farm plan — six steps</h2><ol class="steps grid3">${steps}</ol></section>
   </div>${foot}`;
 }
 
@@ -383,6 +421,7 @@ function wallPage() {
 
 /* ---------- audit & model card ---------- */
 function auditPage() {
+  const compRows = [...R.comps_scatter].sort((a, b) => b.tvl_usd - a.tvl_usd).map((p) => `<tr><td class="cat">${esc(p.category || '—')}</td><td class="r num">${moneyShort(p.tvl_usd)}</td><td class="r num">${moneyShort(p.mcap_usd)}</td><td class="r num">${moneyShort(p.loo_pred_usd)}</td><td class="r num">×${Math.max(p.mcap_usd / p.loo_pred_usd, p.loo_pred_usd / p.mcap_usd).toFixed(2)}</td></tr>`).join('');
   const hind = new Map(BT.hindcast_grades.map((g) => [g.id, g]));
   const lsMap = new Map(BT.log_scores.map((s) => [s.id, s.mean_log_score]));
   const cand = BT.candidates.map((c) => { const h = hind.get(c.id); return `<tr${c.winner ? ' style="color:var(--signal)"' : ''}><td>${c.id} — ${esc(c.label)}${c.winner ? ' ◆ ships' : ''}</td>
@@ -414,17 +453,34 @@ function auditPage() {
   (origin 1: fit oldest ${BT.hindcast_origins[0].train_n} dated comps, grade the next ${BT.hindcast_origins[0].test_n}; origin 2: fit oldest ${BT.hindcast_origins[1].train_n},
   grade the newest ${BT.hindcast_origins[1].test_n}) — never on the split that calibrates the bands. A challenger ships only on a strict
   two-origin mean win of 5% or more (10% for the ensemble), losing neither origin by over 10%, with a stable coefficient sign where it
-  fits one. Round 5 ran six: the Huber fit (I) and the ensemble (J) each lost origin 2 by more than 10%; the fitted growth term (M) beat
-  the incumbent at both origins by under 1.2% — inside the margin, recorded as a tie, and its full-pool coefficient flips sign against both
-  era fits, so the growth question is closed; the fitted maturity (N) and breadth (O) coefficients flip sign between eras outright.
-  Category factors lost at both shrinkages (C, C2). The median fit ships again — the same rule, applied the same way, every round.
-  The log-score column grades each candidate's whole held-out distribution under a proper scoring rule; the hybrid (H) edges it there
-  by 0.002, inside any reasonable noise, and the shipped model is second of ${BT.log_scores.length}.</p></section>
+  fits one. Round 5 ran six: Huber (I) and the ensemble (J) each lost origin 2 by over 10%; the fitted growth term (M) beat the
+  incumbent at both origins by under 1.2% — inside the margin, a tie, and its full-pool coefficient flips sign against both era fits,
+  so growth is closed; maturity (N) and breadth (O) flip sign between eras outright. Category factors lost at both shrinkages
+  (C, C2). The median fit ships again — the same rule, applied the same way, every round.
+  The log-score column grades each candidate's whole held-out distribution under a proper scoring rule; the hybrid (H) edges the
+  shipped model there by 0.002 — inside any reasonable noise; it is second of ${BT.log_scores.length}.</p></section>
+  <section class="panel"><h2>Held-out comps — what the curve said vs what the market did</h2>
+  <p class="sub" style="margin-top:0">All ${R.comps_scatter.length} graded comps, each priced blind (leave-one-out: the fit never saw the row) against its actual market cap. The band on every board row is built from exactly these errors.</p>
+  <div class="scrollbox"><div class="table-wrap"><table><thead><tr><th>Category</th><th class="r">TVL</th><th class="r">Actual mcap</th><th class="r">Curve (held out)</th><th class="r">Error</th></tr></thead>
+  <tbody>${compRows}</tbody></table></div></div></section>
+  <section class="panel"><h2>Growth &amp; age — the two signals the curve does not price, audited</h2>
+  <p class="sub">The value-model criterion names TVL, its seven-day growth and time with no token. This model prices with TVL alone;
+  the other two were measured three ways, and the measurements — not a preference — are what keep them out of the price.
+  <b>Era fits:</b> the growth coefficient fits at ${BT.fitted_coefficients.beta[0]} on the oldest era and ${BT.fitted_coefficients.beta[1]} on the next,
+  then flips to ${BT.adjustments.beta} on the full pool; the maturity coefficient flips between eras outright
+  (${BT.fitted_coefficients.gamma[0]} / ${BT.fitted_coefficients.gamma[1]}). A term whose sign depends on the era is not a term, it is noise with a name.
+  <b>Factor check:</b> the shipped curve's leave-one-out residuals correlate with the growth covariate at r = ${GA.factor_check.growth_corr}
+  and with age at r = ${GA.factor_check.age_corr} (n = ${GA.factor_check.n}); pure noise at this n spans ±${GA.factor_check.noise_band}, so both sit inside it.
+  <b>Candidate T:</b> the fitted terms re-applied as a tilt, hard-capped at ×${GA.tilt_gate.cap_lo}–×${GA.tilt_gate.cap_hi} with the caps fixed before any fit,
+  graded on the same two origins — origin 1 ×${GA.tilt_gate.origins[0].t} against the curve's ×${GA.tilt_gate.origins[0].g},
+  origin 2 ×${GA.tilt_gate.origins[1].t} against ×${GA.tilt_gate.origins[1].g}, mean ×${GA.tilt_gate.mean_t} against ×${GA.tilt_gate.mean_g}
+  (${GA.tilt_gate.improvement_pct}% — the gate needs 5%): ${GA.tilt_gate.verdict}.
+  Growth and age stay on every row — the 7d column, the age in the detail view, the farm plan's hold — as display and audit. They are simply not allowed to move a price until they earn it.</p></section>
   <section class="panel"><h2>Exclusion audit — all ${R.audit.excluded.length} turned away, with reasons</h2>
   <table class="mini-table"><tbody>${reasonRows}</tbody></table>
   <p class="sub">Counterfactual, stated plainly: the largest exclusion is ${esc(largest.name)} at ${money(largest.tvl_usd)} of TVL.
-  Ranked, it would sit at #1 by size — and it is an exchange's own product line, so its TVL is a balance sheet, not a launch waiting to happen.
-  That is why the hygiene exists, and why every exclusion is published rather than silent.</p>
+  Ranked, it would sit at #1 by size — an exchange's own product line: its TVL is a balance sheet, not a launch waiting to happen.
+  That is why the hygiene exists, and why every exclusion is published.</p>
   <div class="scrollbox"><div class="table-wrap"><table><thead><tr><th>Protocol</th><th>Category</th><th class="r">TVL</th><th>Reason</th></tr></thead>
   <tbody>${excl}</tbody></table></div></div></section>${foot}`;
 }

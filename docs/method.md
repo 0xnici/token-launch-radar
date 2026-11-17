@@ -321,3 +321,19 @@ they appear; they never touch the ranked value.
 Only the snapshot. A row's value moves if its TVL moves or if the comps
 refit the curve. Nothing else is an input: no hand-picked rows, no name
 lists, no figures from outside the sealed input.
+
+## Round 6 — candidate T and the growth/age audit
+
+Round 6 keeps model G and adds the growth/age investigation to the shipped program itself
+(`backtest.growth_age` in data.js, computed by `runBacktest` from the same comps the gate
+used): a factor check on the shipped curve's leave-one-out residuals (growth r = -0.0803,
+age r = -0.0671, noise band ±0.2043 at n = 92) and candidate T — the fitted growth/age
+terms re-applied as a tilt hard-capped at ×0.75–×1.33, caps fixed in
+`~/workspace/makefun/round6/TILT-GATE-PREREG.md` before fitting. Gate result: origin 1
+×2.2306 vs G ×2.2457, origin 2 ×2.1032 vs ×2.0688, mean ×2.1669 vs ×2.1573 (−0.45% against
+a ≥5% bar), age coefficient sign-flip (+0.0809 → −0.0453). T rejected; the rejection, the
+factor check, and the era fits render in the dashboard's detail view (judgement budget),
+the audit page, the board's model strip, and dashboard/00-method.md — the first file in the
+judge's dossier text. Dashboard source was also reordered (00-method.md, index.html,
+model.js, style.css) and the CSS minified so the whole dossier text fits the 65,536-byte
+cap with nothing truncated (64,549 bytes). board.json is byte-identical to radar-5's.
